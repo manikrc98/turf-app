@@ -29,6 +29,9 @@ class TurfViewModel : ViewModel() {
     private val _loopCapturedEvent = MutableSharedFlow<com.yourname.turf.model.TurfLoop>(replay = 0)
     val loopCapturedEvent: SharedFlow<com.yourname.turf.model.TurfLoop> = _loopCapturedEvent.asSharedFlow()
 
+    private val _claimedLoopCoveredEvent = MutableSharedFlow<com.yourname.turf.model.ClaimedLoop>(replay = 0)
+    val claimedLoopCoveredEvent: SharedFlow<com.yourname.turf.model.ClaimedLoop> = _claimedLoopCoveredEvent.asSharedFlow()
+
     // Stores the snapshot of the session summary after it has ended
     var lastSummaryState: TurfSessionState? = null
         private set
@@ -45,6 +48,12 @@ class TurfViewModel : ViewModel() {
             boundService.setOnLoopCapturedListener { loop ->
                 viewModelScope.launch {
                     _loopCapturedEvent.emit(loop)
+                }
+            }
+
+            boundService.setOnClaimedLoopCoveredListener { claimedLoop ->
+                viewModelScope.launch {
+                    _claimedLoopCoveredEvent.emit(claimedLoop)
                 }
             }
 

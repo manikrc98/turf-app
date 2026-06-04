@@ -8,6 +8,10 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
@@ -52,8 +56,10 @@ import java.util.Locale
 import java.util.UUID
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import com.yourname.turf.model.ClaimedLoop
+import com.yourname.turf.model.ClaimedLoopRepository
 
-class MapActivity : AppCompatActivity(), OnMapReadyCallback {
+class MapActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListener {
 
     private lateinit var binding: ActivityMapBinding
     private val viewModel: TurfViewModel by viewModels()
@@ -69,6 +75,20 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
 
     // Persistent Bottom Sheet Behavior
     private lateinit var bottomSheetBehavior: BottomSheetBehavior<View>
+
+    // Device orientation sensor variables
+    private lateinit var sensorManager: SensorManager
+    private var rotationSensor: Sensor? = null
+    private var currentHeading: Float = 0f
+
+    // Idle state location variables
+    private lateinit var activityLocationManager: com.yourname.turf.location.LocationManager
+    private var lastKnownLatLng: LatLng? = null
+
+    // Label markers lists
+    private val activeLabelMarkers = mutableListOf<Marker>()
+    private val historicalLabelMarkers = mutableListOf<Marker>()
+    private val claimedLabelMarkers = mutableListOf<Marker>()
 
     // Permission launcher
     private val requestPermissionsLauncher = registerForActivityResult(
@@ -92,6 +112,24 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
 
         userIconDescriptor = createUserPositionIcon()
         bottomSheetBehavior = BottomSheetBehavior.from(binding.persistentBottomSheet)
+        bottomSheetBehavior.addBottomSheetCallback(object : BottomSheetBehavior.BottomSheetCallback() {
+            override fun onStateChanged(bottomSheet: View, newState: Int) {}
+            override fun onSlide(bottomSheet: View, slideOffset: Float) {
+                if (slideOffset > 0f && bottomSheet.height > 0) {
+                    val heightDiff = bottomSheet.height - bottomSheetBehavior.peekHeight
+                    binding.fabRecenter.translationY = -slideOffset * heightDiff
+                } else {
+                    binding.fabRecenter.translationY = 0f
+                }
+            }
+        })
+
+        sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        rotationSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+        if (rotationSensor == null) {
+            rotationSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ORIENTATION)
+        }
+        activityLocationManager = com.yourname.turf.location.LocationManager(this)
 
         setupNavigationDrawer()
         checkPermissionsAndInit()
@@ -178,12 +216,15 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
         binding.btnStartWalk.isEnabled = true
         binding.fabRecenter.visibility = View.VISIBLE
 
+        migrateHistoryLoopsToClaims()
+
         // Initialize Map
         val mapFragment = supportFragmentManager.findFragmentById(R.id.mapFragment) as SupportMapFragment
         mapFragment.getMapAsync(this)
 
         setupButtonListeners()
         observeViewModel()
+        startLocationUpdates()
     }
 
     override fun onStart() {
@@ -218,6 +259,10 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
             uiSettings.isZoomGesturesEnabled = true
         }
 
+        map.setOnCameraIdleListener {
+            updateLabelMarkersVisibility()
+        }
+
         // Camera move listener to disable snapping if user manually pans map
         map.setOnCameraMoveStartedListener { reason ->
             if (reason == GoogleMap.OnCameraMoveStartedListener.REASON_GESTURE) {
@@ -231,9 +276,11 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
         // Draw persistent loops from past walk history
         drawHistoricalPolygons()
 
-        // Set listener for taps on persistent or active loops
         map.setOnPolygonClickListener { polygon ->
             when (val tag = polygon.tag) {
+                is ClaimedLoop -> {
+                    showClaimedLoopDetailDialog(tag)
+                }
                 is com.yourname.turf.model.TurfLoop -> {
                     showClaimLoopDialog(tag)
                 }
@@ -442,12 +489,72 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
         }
         historicalPolygons.clear()
 
-        // Read from history
+        // Remove existing historical label markers
+        for (marker in historicalLabelMarkers) {
+            marker.remove()
+        }
+        historicalLabelMarkers.clear()
+
+        // Remove existing claimed label markers
+        for (marker in claimedLabelMarkers) {
+            marker.remove()
+        }
+        claimedLabelMarkers.clear()
+
+        // Read claimed loops first
+        val claimedRepo = com.yourname.turf.model.ClaimedLoopRepository(this)
+        val claimedLoops = claimedRepo.getClaimedLoops()
+
+        // 1. Draw Claimed Loops (dynamic colors, streak text labels)
+        for (claimedLoop in claimedLoops) {
+            val baseColor = claimedLoop.getDynamicColor()
+            val fill = Color.argb(80, Color.red(baseColor), Color.green(baseColor), Color.blue(baseColor))
+            val stroke = Color.argb(200, Color.red(baseColor), Color.green(baseColor), Color.blue(baseColor))
+
+            val options = PolygonOptions()
+                .addAll(claimedLoop.points)
+                .fillColor(fill)
+                .strokeColor(stroke)
+                .strokeWidth(5f)
+                .clickable(true)
+            
+            val addedPoly = map.addPolygon(options)
+            addedPoly.tag = claimedLoop
+            historicalPolygons.add(addedPoly)
+
+            // Add text label with streak count
+            val markerPos = getMarkerPosition(claimedLoop.points)
+            val currentZoom = googleMap?.cameraPosition?.zoom ?: 0f
+            val zoomedIn = currentZoom >= 15.5f
+            val bitmap = if (zoomedIn) {
+                createCardBitmap(claimedLoop.name, claimedLoop.streakCount, claimedLoop.coveredCountToday)
+            } else {
+                createDotBitmap()
+            }
+            val markerOptions = MarkerOptions()
+                .position(markerPos)
+                .icon(BitmapDescriptorFactory.fromBitmap(bitmap))
+                .anchor(0.5f, 0.5f)
+                .flat(true)
+                .visible(true)
+            val marker = map.addMarker(markerOptions)
+            if (marker != null) {
+                marker.tag = claimedLoop
+                claimedLabelMarkers.add(marker)
+            }
+        }
+
+        // 2. Read from walk history and draw historical unclaimed loops (green)
         val historyRepo = com.yourname.turf.model.HistoryRepository(this)
         val history = historyRepo.getHistory()
 
         for (session in history) {
             for (loop in session.loops) {
+                // Skip if this loop is currently claimed
+                if (claimedLoops.any { it.id == loop.id }) {
+                    continue
+                }
+
                 val options = PolygonOptions()
                     .addAll(loop.points)
                     .fillColor(Color.argb(80, 76, 175, 80))
@@ -458,6 +565,23 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
                 val addedPoly = map.addPolygon(options)
                 addedPoly.tag = Pair(session, loop)
                 historicalPolygons.add(addedPoly)
+
+                // Add text label marker if loop has a name
+                val loopName = loop.name
+                if (!loopName.isNullOrEmpty()) {
+                    val centroid = getCentroid(loop.points)
+                    val bitmap = createTextBitmap(loopName)
+                    val markerOptions = MarkerOptions()
+                        .position(centroid)
+                        .icon(BitmapDescriptorFactory.fromBitmap(bitmap))
+                        .anchor(0.5f, 0.5f)
+                        .flat(true)
+                        .visible(googleMap?.cameraPosition?.zoom ?: 0f >= 15.5f)
+                    val marker = map.addMarker(markerOptions)
+                    if (marker != null) {
+                        historicalLabelMarkers.add(marker)
+                    }
+                }
             }
         }
     }
@@ -514,7 +638,25 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
                 val name = input.text.toString().trim()
                 if (name.isNotEmpty()) {
                     viewModel.nameLoop(loop.id, name)
+                    
+                    val claimedRepo = com.yourname.turf.model.ClaimedLoopRepository(this)
+                    val existingClaim = claimedRepo.getClaimedLoops().find { it.id == loop.id }
+                    if (existingClaim != null) {
+                        claimedRepo.addOrUpdateClaimedLoop(existingClaim.copy(name = name))
+                    } else {
+                        val today = com.yourname.turf.model.ClaimedLoopRepository.getTodayDateString()
+                        val newClaim = com.yourname.turf.model.ClaimedLoop(
+                            id = loop.id,
+                            name = name,
+                            points = loop.points,
+                            streakCount = 1,
+                            lastCoveredDate = today,
+                            coveredCountToday = 1
+                        )
+                        claimedRepo.addOrUpdateClaimedLoop(newClaim)
+                    }
                     Toast.makeText(this, "Loop claimed as: $name", Toast.LENGTH_SHORT).show()
+                    drawHistoricalPolygons()
                 } else {
                     Toast.makeText(this, "Loop name cannot be empty", Toast.LENGTH_SHORT).show()
                 }
@@ -544,6 +686,20 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
                         ).show()
                         
                         showClaimLoopDialog(loop)
+                    }
+                }
+
+                // Collect claimed loop cover events
+                launch {
+                    viewModel.claimedLoopCoveredEvent.collectLatest { claimedLoop ->
+                        Snackbar.make(
+                            binding.coordinatorLayout,
+                            "Claimed Loop '${claimedLoop.name}' covered! 🔥 Streak: ${claimedLoop.streakCount} days (Covered ${claimedLoop.coveredCountToday} times today)",
+                            Snackbar.LENGTH_LONG
+                        ).show()
+                        
+                        // Force redraw of loops to update color/labels
+                        drawHistoricalPolygons()
                     }
                 }
                 
@@ -615,9 +771,10 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
         // 1. Draw Active Polyline
         activePolyline?.remove()
         if (state.trailPoints.isNotEmpty()) {
+            val trailColor = state.activeTrailColor ?: Color.parseColor("#E53935")
             val options = PolylineOptions()
                 .addAll(state.trailPoints)
-                .color(Color.parseColor("#E53935")) // Crimson red
+                .color(trailColor)
                 .width(8f)
                 .jointType(JointType.ROUND)
                 .startCap(RoundCap())
@@ -633,22 +790,70 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
         }
         activePolygons.clear()
 
+        for (marker in activeLabelMarkers) {
+            marker.remove()
+        }
+        activeLabelMarkers.clear()
+
+        val claimedRepo = com.yourname.turf.model.ClaimedLoopRepository(this)
+        val claimedLoops = claimedRepo.getClaimedLoops()
+
         for (loop in state.capturedLoops) {
+            val claimedLoop = claimedLoops.find { it.id == loop.id }
             val options = PolygonOptions()
                 .addAll(loop.points)
-                .fillColor(Color.argb(80, 76, 175, 80)) // rgba(76, 175, 80, 0.31)
-                .strokeColor(Color.argb(200, 46, 125, 50)) // rgba(46, 125, 50, 0.78)
-                .strokeWidth(3f)
                 .clickable(true)
+
+            if (claimedLoop != null) {
+                val baseColor = claimedLoop.getDynamicColor()
+                val fill = Color.argb(80, Color.red(baseColor), Color.green(baseColor), Color.blue(baseColor))
+                val stroke = Color.argb(200, Color.red(baseColor), Color.green(baseColor), Color.blue(baseColor))
+                options.fillColor(fill)
+                       .strokeColor(stroke)
+                       .strokeWidth(5f)
+            } else {
+                options.fillColor(Color.argb(80, 76, 175, 80)) // rgba(76, 175, 80, 0.31)
+                       .strokeColor(Color.argb(200, 46, 125, 50)) // rgba(46, 125, 50, 0.78)
+                       .strokeWidth(3f)
+            }
+
             val addedPoly = map.addPolygon(options)
-            addedPoly.tag = loop
+            addedPoly.tag = claimedLoop ?: loop
             activePolygons.add(addedPoly)
+
+            // Add text label
+            val markerPos = if (claimedLoop != null) getMarkerPosition(loop.points) else getCentroid(loop.points)
+            val currentZoom = googleMap?.cameraPosition?.zoom ?: 0f
+            val zoomedIn = currentZoom >= 15.5f
+            val bitmap = if (claimedLoop != null) {
+                if (zoomedIn) {
+                    createCardBitmap(claimedLoop.name, claimedLoop.streakCount, claimedLoop.coveredCountToday)
+                } else {
+                    createDotBitmap()
+                }
+            } else if (!loop.name.isNullOrEmpty()) {
+                createTextBitmap(loop.name)
+            } else {
+                null
+            }
+
+            if (bitmap != null) {
+                val markerOptions = MarkerOptions()
+                    .position(markerPos)
+                    .icon(BitmapDescriptorFactory.fromBitmap(bitmap))
+                    .anchor(0.5f, 0.5f)
+                    .flat(true)
+                    .visible(if (claimedLoop != null) true else currentZoom >= 15.5f)
+                val marker = map.addMarker(markerOptions)
+                if (marker != null) {
+                    marker.tag = claimedLoop ?: loop
+                    activeLabelMarkers.add(marker)
+                }
+            }
         }
 
         // 3. User Marker position
-        // When active, the user position is the last trail point.
-        // Otherwise we check for the last known GPS location in standard map settings.
-        val lastPoint = state.trailPoints.lastOrNull()
+        val lastPoint = state.trailPoints.lastOrNull() ?: lastKnownLatLng
         if (lastPoint != null) {
             if (userMarker == null) {
                 userMarker = map.addMarker(
@@ -661,7 +866,7 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
             } else {
                 userMarker?.position = lastPoint
             }
-            userMarker?.rotation = state.bearing
+            userMarker?.rotation = currentHeading
 
             if (shouldFollowCamera && state.sessionStatus == SessionStatus.ACTIVE) {
                 map.animateCamera(CameraUpdateFactory.newLatLngZoom(lastPoint, 17f))
@@ -731,5 +936,355 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
         canvas.drawPath(arrowPath, arrowOutlinePaint)
 
         return BitmapDescriptorFactory.fromBitmap(bitmap)
+    }
+
+    private fun startLocationUpdates() {
+        val fineLocationGranted = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        if (fineLocationGranted) {
+            activityLocationManager.startLocationUpdates { location ->
+                val latLng = LatLng(location.latitude, location.longitude)
+                lastKnownLatLng = latLng
+                updateMapOverlays(viewModel.uiState.value)
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        rotationSensor?.let {
+            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI)
+        }
+        val fineLocationGranted = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        if (fineLocationGranted && ::activityLocationManager.isInitialized) {
+            startLocationUpdates()
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        sensorManager.unregisterListener(this)
+        if (::activityLocationManager.isInitialized) {
+            activityLocationManager.stopLocationUpdates()
+        }
+    }
+
+    override fun onSensorChanged(event: SensorEvent) {
+        if (event.sensor.type == Sensor.TYPE_ROTATION_VECTOR) {
+            val rotationMatrix = FloatArray(9)
+            SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
+            val orientationValues = FloatArray(3)
+            SensorManager.getOrientation(rotationMatrix, orientationValues)
+            val azimuthInRadians = orientationValues[0]
+            var azimuthInDegrees = Math.toDegrees(azimuthInRadians.toDouble()).toFloat()
+            if (azimuthInDegrees < 0) {
+                azimuthInDegrees += 360f
+            }
+            currentHeading = azimuthInDegrees
+            userMarker?.rotation = currentHeading
+        } else if (event.sensor.type == Sensor.TYPE_ORIENTATION) {
+            val azimuthInDegrees = event.values[0]
+            currentHeading = azimuthInDegrees
+            userMarker?.rotation = currentHeading
+        }
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
+        // No-op
+    }
+
+    private fun updateLabelMarkersVisibility() {
+        val map = googleMap ?: return
+        val zoom = map.cameraPosition.zoom
+        val zoomedInEnough = zoom >= 15.5f
+        
+        // Standard historical labels (unclaimed) are only visible when zoomed in
+        val historicalVisible = zoom >= 15.5f
+        for (marker in historicalLabelMarkers) {
+            marker.isVisible = historicalVisible
+        }
+
+        // Active session labels
+        for (marker in activeLabelMarkers) {
+            val tag = marker.tag
+            if (tag is ClaimedLoop) {
+                marker.isVisible = true
+                val bitmap = if (zoomedInEnough) {
+                    createCardBitmap(tag.name, tag.streakCount, tag.coveredCountToday)
+                } else {
+                    createDotBitmap()
+                }
+                marker.setIcon(BitmapDescriptorFactory.fromBitmap(bitmap))
+            } else {
+                marker.isVisible = historicalVisible
+            }
+        }
+
+        // Claimed loop labels
+        for (marker in claimedLabelMarkers) {
+            val tag = marker.tag
+            if (tag is ClaimedLoop) {
+                marker.isVisible = true
+                val bitmap = if (zoomedInEnough) {
+                    createCardBitmap(tag.name, tag.streakCount, tag.coveredCountToday)
+                } else {
+                    createDotBitmap()
+                }
+                marker.setIcon(BitmapDescriptorFactory.fromBitmap(bitmap))
+            }
+        }
+    }
+
+    private fun getCentroid(points: List<LatLng>): LatLng {
+        if (points.isEmpty()) return LatLng(0.0, 0.0)
+        var lat = 0.0
+        var lng = 0.0
+        for (p in points) {
+            lat += p.latitude
+            lng += p.longitude
+        }
+        return LatLng(lat / points.size, lng / points.size)
+    }
+
+    private fun createTextBitmap(text: String): Bitmap {
+        val textPaint = Paint().apply {
+            color = Color.parseColor("#2E7D32")
+            textSize = 36f
+            isAntiAlias = true
+            style = Paint.Style.FILL
+            textAlign = Paint.Align.CENTER
+            typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
+        }
+        
+        val outlinePaint = Paint().apply {
+            color = Color.WHITE
+            textSize = 36f
+            isAntiAlias = true
+            style = Paint.Style.STROKE
+            strokeWidth = 6f
+            strokeJoin = Paint.Join.ROUND
+            strokeCap = Paint.Cap.ROUND
+            textAlign = Paint.Align.CENTER
+            typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
+        }
+        
+        val textBounds = android.graphics.Rect()
+        textPaint.getTextBounds(text, 0, text.length, textBounds)
+        
+        val safetyPadding = 8
+        val width = textBounds.width() + safetyPadding * 2
+        val height = textBounds.height() + safetyPadding * 2
+        
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        
+        val textX = width / 2f
+        val textY = (height / 2f) - textBounds.exactCenterY()
+        
+        // Draw the outline/halo first
+        canvas.drawText(text, textX, textY, outlinePaint)
+        // Draw the filled text on top
+        canvas.drawText(text, textX, textY, textPaint)
+        
+        return bitmap
+    }
+
+    private fun showClaimedLoopDetailDialog(loop: ClaimedLoop) {
+        val input = android.widget.EditText(this).apply {
+            hint = "e.g., Park Path, Garden Loop"
+            setSingleLine(true)
+            setText(loop.name)
+            setSelection(text.length)
+        }
+        
+        val container = android.widget.FrameLayout(this).apply {
+            val padding = (16 * resources.displayMetrics.density).toInt()
+            setPadding(padding, 8, padding, 8)
+            addView(input)
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Claimed Loop: ${loop.name} 🏆")
+            .setMessage(
+                "🔥 Streak: ${loop.streakCount} days\n" +
+                "🔄 Covered today: ${loop.coveredCountToday} times\n" +
+                "📅 Last covered: ${loop.lastCoveredDate}\n\n" +
+                "Rename this claimed loop:"
+            )
+            .setView(container)
+            .setPositiveButton("Save") { _, _ ->
+                val newName = input.text.toString().trim()
+                if (newName.isNotEmpty()) {
+                    val updated = loop.copy(name = newName)
+                    val claimedRepo = com.yourname.turf.model.ClaimedLoopRepository(this)
+                    claimedRepo.addOrUpdateClaimedLoop(updated)
+                    Toast.makeText(this, "Loop renamed to: $newName", Toast.LENGTH_SHORT).show()
+                    drawHistoricalPolygons()
+                }
+            }
+            .setNegativeButton("Close", null)
+            .setNeutralButton("Abandon Claim") { _, _ ->
+                AlertDialog.Builder(this)
+                    .setTitle("Abandon Claim?")
+                    .setMessage("Are you sure you want to abandon the claim on '${loop.name}'? Your streak will be lost.")
+                    .setPositiveButton("Yes, Abandon") { _, _ ->
+                        val claimedRepo = com.yourname.turf.model.ClaimedLoopRepository(this)
+                        claimedRepo.deleteClaim(loop.id)
+                        Toast.makeText(this, "Claim abandoned", Toast.LENGTH_SHORT).show()
+                        drawHistoricalPolygons()
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            }
+            .show()
+    }
+
+    private fun createDotBitmap(): Bitmap {
+        val density = resources.displayMetrics.density
+        val size = (16 * density).toInt()
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        val center = size / 2f
+        val radius = 6f * density
+        
+        val borderPaint = Paint().apply {
+            color = Color.parseColor("#0D47A1") // Dark Blue border
+            style = Paint.Style.STROKE
+            strokeWidth = 2f * density
+            isAntiAlias = true
+        }
+        
+        val fillPaint = Paint().apply {
+            color = Color.WHITE
+            style = Paint.Style.FILL
+            isAntiAlias = true
+        }
+        
+        canvas.drawCircle(center, center, radius, fillPaint)
+        canvas.drawCircle(center, center, radius, borderPaint)
+        return bitmap
+    }
+
+    private fun getMarkerPosition(points: List<LatLng>): LatLng {
+        if (points.isEmpty()) return LatLng(0.0, 0.0)
+        var maxLat = -90.0
+        var bestPoint = points[0]
+        for (p in points) {
+            if (p.latitude > maxLat) {
+                maxLat = p.latitude
+                bestPoint = p
+            }
+        }
+        // Place it 0.00012 degrees north (approx 13 metres north of the northernmost boundary point)
+        return LatLng(bestPoint.latitude + 0.00012, bestPoint.longitude)
+    }
+
+    private fun createCardBitmap(name: String, streak: Int, coveredCount: Int): Bitmap {
+        val density = resources.displayMetrics.density
+        
+        val heroPaint = Paint().apply {
+            color = Color.parseColor("#0D47A1") // Vibrant Deep Blue
+            textSize = 15f * density
+            isAntiAlias = true
+            textAlign = Paint.Align.CENTER
+            typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
+        }
+        
+        val subtextPaint = Paint().apply {
+            color = Color.parseColor("#555555") // Slate Gray
+            textSize = 12f * density
+            isAntiAlias = true
+            textAlign = Paint.Align.CENTER
+            typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.NORMAL)
+        }
+        
+        val daysWord = if (streak == 1) "day" else "days"
+        val loopsWord = if (coveredCount == 1) "loop" else "loops"
+        
+        val line1 = "$streak $daysWord of $name"
+        val line2 = "$coveredCount $loopsWord done today"
+        
+        val b1 = android.graphics.Rect()
+        heroPaint.getTextBounds(line1, 0, line1.length, b1)
+        val b2 = android.graphics.Rect()
+        subtextPaint.getTextBounds(line2, 0, line2.length, b2)
+        
+        val textWidth = maxOf(b1.width(), b2.width())
+        val paddingX = 16f * density
+        val paddingY = 12f * density
+        
+        val cardWidth = textWidth + paddingX * 2
+        val lineSpacing = 6f * density
+        val cardHeight = b1.height() + b2.height() + paddingY * 2 + lineSpacing
+        
+        val bitmap = Bitmap.createBitmap(cardWidth.toInt(), cardHeight.toInt(), Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        
+        val cardPaint = Paint().apply {
+            color = Color.WHITE
+            style = Paint.Style.FILL
+            isAntiAlias = true
+            setShadowLayer(4f * density, 0f, 2f * density, Color.parseColor("#30000000"))
+        }
+        
+        val borderPaint = Paint().apply {
+            color = Color.parseColor("#B0BEC5") // Light Gray-blue border
+            style = Paint.Style.STROKE
+            strokeWidth = 1.5f * density
+            isAntiAlias = true
+        }
+        
+        val shadowPadding = 4f * density
+        val rectF = android.graphics.RectF(shadowPadding, shadowPadding, cardWidth - shadowPadding, cardHeight - shadowPadding)
+        val cornerRadius = 8f * density
+        canvas.drawRoundRect(rectF, cornerRadius, cornerRadius, cardPaint)
+        canvas.drawRoundRect(rectF, cornerRadius, cornerRadius, borderPaint)
+        
+        val centerX = cardWidth / 2f
+        val y1 = paddingY + b1.height().toFloat()
+        val y2 = y1 + b2.height() + lineSpacing
+        
+        canvas.drawText(line1, centerX, y1, heroPaint)
+        canvas.drawText(line2, centerX, y2, subtextPaint)
+        
+        return bitmap
+    }
+
+    private fun migrateHistoryLoopsToClaims() {
+        try {
+            val historyRepo = com.yourname.turf.model.HistoryRepository(this)
+            val claimedRepo = com.yourname.turf.model.ClaimedLoopRepository(this)
+            val history = historyRepo.getHistory()
+            val claimed = claimedRepo.getClaimedLoops().toMutableList()
+            val today = com.yourname.turf.model.ClaimedLoopRepository.getTodayDateString()
+            
+            var migrated = false
+            for (session in history) {
+                for (loop in session.loops) {
+                    if (!loop.name.isNullOrEmpty()) {
+                        if (claimed.none { it.id == loop.id }) {
+                            val newClaim = com.yourname.turf.model.ClaimedLoop(
+                                id = loop.id,
+                                name = loop.name,
+                                points = loop.points,
+                                streakCount = 1,
+                                lastCoveredDate = today,
+                                coveredCountToday = 1
+                            )
+                            claimed.add(newClaim)
+                            migrated = true
+                        }
+                    }
+                }
+            }
+            if (migrated) {
+                claimedRepo.saveClaimedLoops(claimed)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 }

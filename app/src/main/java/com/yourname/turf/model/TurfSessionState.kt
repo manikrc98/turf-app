@@ -14,5 +14,6 @@ data class TurfSessionState(
     val bearing: Float = 0f,
     val cadence: Int = 0,
     val elevationGainMetres: Double = 0.0,
-    val durationSeconds: Long = 0L
+    val durationSeconds: Long = 0L,
+    val activeTrailColor: Int? = null
 )

@@ -94,19 +94,6 @@
                 android:textColor="@color/white" />
         </LinearLayout>
 
-        <!-- Recenter FAB -->
-        <com.google.android.material.floatingactionbutton.FloatingActionButton
-            android:id="@+id/fabRecenter"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="bottom|end"
-            android:layout_marginEnd="@dimen/recenter_fab_margin"
-            android:layout_marginBottom="180dp"
-            android:contentDescription="@string/recenter"
-            android:src="@android:drawable/ic_menu_mylocation"
-            app:backgroundTint="@color/white"
-            app:tint="@color/primary"
-            app:elevation="6dp" />
 
         <!-- Persistent Bottom Sheet Container (Persistent) -->
         <androidx.cardview.widget.CardView
@@ -388,6 +375,20 @@
             </LinearLayout>
 
         </androidx.cardview.widget.CardView>
+
+        <!-- Recenter FAB -->
+        <com.google.android.material.floatingactionbutton.FloatingActionButton
+            android:id="@+id/fabRecenter"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom|end"
+            android:layout_marginEnd="16dp"
+            android:layout_marginBottom="184dp"
+            android:contentDescription="@string/recenter"
+            android:src="@android:drawable/ic_menu_mylocation"
+            app:backgroundTint="@color/white"
+            app:tint="@color/primary"
+            app:elevation="6dp" />
 
         <!-- Floating Hamburger FAB Menu Button (Top Left) -->
         <com.google.android.material.floatingactionbutton.FloatingActionButton

@@ -19,6 +19,8 @@ import com.yourname.turf.location.LocationManager
 import com.yourname.turf.loop.LoopDetector
 import com.yourname.turf.model.SessionStatus
 import com.yourname.turf.model.TurfSessionState
+import com.yourname.turf.model.ClaimedLoop
+import com.yourname.turf.model.ClaimedLoopRepository
 import com.yourname.turf.sensor.StepCounterManager
 import com.yourname.turf.ui.MapActivity
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -37,6 +39,7 @@ class TurfTrackerService : LifecycleService() {
 
     private lateinit var locationManager: LocationManager
     private lateinit var stepCounterManager: StepCounterManager
+    private lateinit var claimedLoopRepository: ClaimedLoopRepository
 
     private val _sessionState = MutableStateFlow(TurfSessionState())
     val sessionState: StateFlow<TurfSessionState> = _sessionState.asStateFlow()
@@ -57,6 +60,7 @@ class TurfTrackerService : LifecycleService() {
 
     // Event listener for loop capture to trigger UI notifications
     private var onLoopCapturedListener: ((com.yourname.turf.model.TurfLoop) -> Unit)? = null
+    private var onClaimedLoopCoveredListener: ((ClaimedLoop) -> Unit)? = null
 
     inner class TurfBinder : Binder() {
         fun getService(): TurfTrackerService = this@TurfTrackerService
@@ -66,6 +70,7 @@ class TurfTrackerService : LifecycleService() {
         super.onCreate()
         locationManager = LocationManager(this)
         stepCounterManager = StepCounterManager(this)
+        claimedLoopRepository = ClaimedLoopRepository(this)
         createNotificationChannel()
     }
 
@@ -84,6 +89,10 @@ class TurfTrackerService : LifecycleService() {
 
     fun setOnLoopCapturedListener(listener: (com.yourname.turf.model.TurfLoop) -> Unit) {
         this.onLoopCapturedListener = listener
+    }
+
+    fun setOnClaimedLoopCoveredListener(listener: (ClaimedLoop) -> Unit) {
+        this.onClaimedLoopCoveredListener = listener
     }
 
     fun nameLoop(loopId: String, name: String) {
@@ -272,6 +281,10 @@ class TurfTrackerService : LifecycleService() {
             lastLocationForDistance = location
         }
 
+        // Calculate active trail color based on proximity to any claimed loop
+        val matchingLoopForColor = getMatchingClaimedLoopForLocation(newLatLng)
+        val trailColor = matchingLoopForColor?.getDynamicColor()
+
         // Add point to trail
         _sessionState.update { state ->
             val updatedTrail = state.trailPoints + newLatLng
@@ -280,27 +293,92 @@ class TurfTrackerService : LifecycleService() {
             if (LoopDetector.isLoopClosed(updatedTrail)) {
                 triggerHapticFeedback()
                 val newLoop = com.yourname.turf.model.TurfLoop(points = updatedTrail)
-                onLoopCapturedListener?.invoke(newLoop)
+                
+                val matchingClaimed = getMatchingClaimedLoopForNewLoop(updatedTrail)
+                val loopToSave: com.yourname.turf.model.TurfLoop
+                
+                if (matchingClaimed != null) {
+                    val today = ClaimedLoopRepository.getTodayDateString()
+                    val yesterday = ClaimedLoopRepository.getYesterdayDateString()
+                    val newStreak = if (matchingClaimed.lastCoveredDate == yesterday) {
+                        matchingClaimed.streakCount + 1
+                    } else if (matchingClaimed.lastCoveredDate == today) {
+                        matchingClaimed.streakCount
+                    } else {
+                        1
+                    }
+                    val updatedCovered = matchingClaimed.coveredCountToday + 1
+                    val updatedClaimed = matchingClaimed.copy(
+                        streakCount = newStreak,
+                        lastCoveredDate = today,
+                        coveredCountToday = updatedCovered
+                    )
+                    claimedLoopRepository.addOrUpdateClaimedLoop(updatedClaimed)
+                    
+                    loopToSave = newLoop.copy(id = matchingClaimed.id, name = matchingClaimed.name)
+                    onClaimedLoopCoveredListener?.invoke(updatedClaimed)
+                } else {
+                    loopToSave = newLoop
+                    onLoopCapturedListener?.invoke(newLoop)
+                }
 
-                val newCapturedLoops = state.capturedLoops + newLoop
+                val newCapturedLoops = state.capturedLoops + loopToSave
                 
                 state.copy(
                     loopCount = state.loopCount + 1,
                     trailPoints = listOf(newLatLng), // Reset trail starting from current position
                     capturedLoops = newCapturedLoops,
                     bearing = currentBearing,
-                    elevationGainMetres = totalElevationGainMetres
+                    elevationGainMetres = totalElevationGainMetres,
+                    activeTrailColor = trailColor
                 )
             } else {
                 state.copy(
                     trailPoints = updatedTrail,
                     bearing = currentBearing,
-                    elevationGainMetres = totalElevationGainMetres
+                    elevationGainMetres = totalElevationGainMetres,
+                    activeTrailColor = trailColor
                 )
             }
         }
         
         updateNotification()
+    }
+
+    private fun getMatchingClaimedLoopForLocation(latLng: LatLng): ClaimedLoop? {
+        val claimedLoops = claimedLoopRepository.getClaimedLoops()
+        val thresholdMetres = 25.0 * 0.3048 // 25 feet in meters = 7.62 meters
+        for (loop in claimedLoops) {
+            for (point in loop.points) {
+                val distance = LoopDetector.calculateDistanceMetres(
+                    latLng.latitude, latLng.longitude,
+                    point.latitude, point.longitude
+                )
+                if (distance <= thresholdMetres) {
+                    return loop
+                }
+            }
+        }
+        return null
+    }
+
+    private fun getMatchingClaimedLoopForNewLoop(newLoopPoints: List<LatLng>): ClaimedLoop? {
+        val claimedLoops = claimedLoopRepository.getClaimedLoops()
+        val thresholdMetres = 25.0 * 0.3048 // 25 feet in meters = 7.62 meters
+        for (claimedLoop in claimedLoops) {
+            for (newPt in newLoopPoints) {
+                for (claimedPt in claimedLoop.points) {
+                    val distance = LoopDetector.calculateDistanceMetres(
+                        newPt.latitude, newPt.longitude,
+                        claimedPt.latitude, claimedPt.longitude
+                    )
+                    if (distance <= thresholdMetres) {
+                        return claimedLoop
+                    }
+                }
+            }
+        }
+        return null
     }
 
     private fun triggerHapticFeedback() {

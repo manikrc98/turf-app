@@ -4,7 +4,7 @@ plugins {
 }
 
 android {
-    namespace 'com.yourname.turf'
+    namespace = 'com.yourname.turf'
     compileSdk 34
 
     defaultConfig {
@@ -31,7 +31,7 @@ android {
         jvmTarget = '21'
     }
     buildFeatures {
-        viewBinding true
+        viewBinding = true
     }
 }
 

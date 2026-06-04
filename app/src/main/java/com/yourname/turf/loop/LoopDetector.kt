@@ -4,7 +4,7 @@ import com.google.android.gms.maps.model.LatLng
 import kotlin.math.*
 
 object LoopDetector {
-    const val LOOP_THRESHOLD_METRES = 25f
+    const val LOOP_THRESHOLD_METRES = 10f
     const val MIN_TRAIL_POINTS = 20
 
     /**
