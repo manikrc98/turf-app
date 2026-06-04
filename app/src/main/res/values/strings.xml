@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">TURF</string>
+    <string name="google_maps_key">AIzaSyCTd5Kqot24CcIFGvuTyMxsrHb6V6ekxBA</string>
+    <string name="start_walk">Start walk</string>
+    <string name="pause">Pause</string>
+    <string name="resume">Resume</string>
+    <string name="end_walk">End walk</string>
+    <string name="share">Share</string>
+    <string name="done">Done</string>
+    <string name="recenter">Recenter</string>
+    
+    <!-- Metrics titles -->
+    <string name="steps">Steps</string>
+    <string name="distance">Distance</string>
+    <string name="turf_captured">Turf captured</string>
+    <string name="duration">Duration</string>
+    
+    <!-- State and Warning Chips -->
+    <string name="weak_gps">Weak GPS signal</string>
+    <string name="walk_paused">Walk paused</string>
+    <string name="location_denied_empty_state">TURF needs location access to track your walk.</string>
+    <string name="open_settings">Open Settings</string>
+    <string name="step_sensor_fallback_toast">Step sensor not found — using GPS distance instead.</string>
+    <string name="turf_captured_snackbar">Turf captured! 🟢 Keep going.</string>
+    <string name="zero_loops_nudge">Try completing a loop next time!</string>
+    <string name="notification_title">TURF is tracking your walk</string>
+    <string name="notification_channel_name">TURF Walk Tracking</string>
+</resources>

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+    
+    <!-- Branding -->
+    <color name="primary">#2E7D32</color>
+    <color name="primary_dark">#1B5E20</color>
+    <color name="primary_light">#E8F5E9</color>
+    <color name="accent">#E53935</color>
+    
+    <!-- Pill/Card Fills and Borders -->
+    <color name="captured_zone_fill">#4CAF50</color>
+    <color name="captured_zone_border">#2E7D32</color>
+    
+    <!-- UI Elements -->
+    <color name="gray_light">#F5F5F5</color>
+    <color name="gray_medium">#E0E0E0</color>
+    <color name="gray_dark">#757575</color>
+    <color name="text_primary">#212121</color>
+    <color name="text_secondary">#666666</color>
+    <color name="ripple">#20000000</color>
+    
+    <!-- Pulse blue dot -->
+    <color name="user_dot_fill">#2196F3</color>
+    <color name="user_dot_ring">#402196F3</color>
+</resources>
