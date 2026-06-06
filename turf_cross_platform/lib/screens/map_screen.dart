@@ -7,11 +7,11 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:provider/provider.dart';
 
-import '../providers/turf_session_provider.dart';
+import '../providers/tracking_metrics_provider.dart';
+import '../providers/location_tracking_provider.dart';
 import '../models/session_status.dart';
 import '../models/turf_loop.dart';
 import '../models/claimed_loop.dart';
-import '../models/turf_session_state.dart';
 import 'history_bottom_sheet.dart';
 import 'summary_bottom_sheet.dart';
 import 'marker_generator.dart';
@@ -100,7 +100,7 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   void _setupEventsListener() {
-    final provider = Provider.of<TurfSessionProvider>(context, listen: false);
+    final provider = Provider.of<LocationTrackingProvider>(context, listen: false);
 
     // Listen for new loops captured (prompt user to name them)
     _loopCapturedSubscription = provider.loopCapturedEvents.listen((loop) {
@@ -158,8 +158,8 @@ class _MapScreenState extends State<MapScreen> {
           _currentLocation = newLatLng;
         });
 
-        final provider = Provider.of<TurfSessionProvider>(context, listen: false);
-        if (_shouldFollowCamera && provider.state.sessionStatus == SessionStatus.active) {
+        final provider = Provider.of<TrackingMetricsProvider>(context, listen: false);
+        if (_shouldFollowCamera && provider.sessionStatus == SessionStatus.active) {
           _isProgrammaticMovement = true;
           _mapController.future.then((controller) {
             controller.animateCamera(CameraUpdate.newLatLng(newLatLng));
@@ -198,21 +198,20 @@ class _MapScreenState extends State<MapScreen> {
       return _buildPermissionDeniedUI();
     }
 
-    final provider = Provider.of<TurfSessionProvider>(context);
-    final sessionState = provider.state;
+    final trackingProvider = Provider.of<LocationTrackingProvider>(context);
 
     // Handle asynchronous pre-caching of loop markers when the database state changes
-    final cacheKey = _getCacheStateKey(provider);
+    final cacheKey = _getCacheStateKey(trackingProvider);
     if (cacheKey != _lastCacheStateKey) {
       _lastCacheStateKey = cacheKey;
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        _preCacheMarkers(provider);
+        _preCacheMarkers(trackingProvider);
       });
     }
 
     return Scaffold(
       backgroundColor: const Color(0xFF0F172A),
-      drawer: _buildNavigationDrawer(provider),
+      drawer: _buildNavigationDrawer(trackingProvider),
       body: Stack(
         children: [
           // 1. Google Map View
@@ -226,9 +225,9 @@ class _MapScreenState extends State<MapScreen> {
             compassEnabled: true,
             zoomControlsEnabled: false,
             mapType: MapType.normal,
-            polylines: _buildPolylines(sessionState),
-            polygons: _buildPolygons(provider),
-            markers: _buildMarkersSync(provider),
+            polylines: _buildPolylines(trackingProvider),
+            polygons: _buildPolygons(trackingProvider),
+            markers: _buildMarkersSync(trackingProvider),
             onMapCreated: (GoogleMapController controller) async {
               _mapController.complete(controller);
               // Load dark map style JSON from assets
@@ -272,43 +271,54 @@ class _MapScreenState extends State<MapScreen> {
           Positioned(
             top: MediaQuery.of(context).padding.top + 16.0,
             right: 16.0,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                if (sessionState.sessionStatus == SessionStatus.paused)
-                  _buildStatusChip("WALK PAUSED", const Color(0xFFFF9800)),
-                if (sessionState.gpsSignalWeak && sessionState.sessionStatus == SessionStatus.active)
-                  const SizedBox(height: 8),
-                if (sessionState.gpsSignalWeak && sessionState.sessionStatus == SessionStatus.active)
-                  _buildStatusChip("WEAK GPS SIGNAL", const Color(0xFFF44336)),
-              ],
+            child: Selector<TrackingMetricsProvider, SessionStatus>(
+              selector: (_, p) => p.sessionStatus,
+              builder: (context, status, _) {
+                final isWeak = trackingProvider.gpsSignalWeak;
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    if (status == SessionStatus.paused)
+                      _buildStatusChip("WALK PAUSED", const Color(0xFFFF9800)),
+                    if (isWeak && status == SessionStatus.active)
+                      const SizedBox(height: 8),
+                    if (isWeak && status == SessionStatus.active)
+                      _buildStatusChip("WEAK GPS SIGNAL", const Color(0xFFF44336)),
+                  ],
+                );
+              },
             ),
           ),
 
           // 4. Recenter FAB (Moves up dynamically when the bottom sheet is dragged open)
-          Positioned(
-            bottom: (sessionState.sessionStatus == SessionStatus.idle 
-                ? (95.0 + MediaQuery.of(context).padding.bottom) 
-                : _bottomSheetHeight) + 16.0,
-            right: 16.0,
-            child: FloatingActionButton(
-              backgroundColor: const Color(0xFF2196F3),
-              onPressed: () async {
-                _shouldFollowCamera = true;
-                if (_currentLocation != null) {
-                  _isProgrammaticMovement = true;
-                  final controller = await _mapController.future;
-                  controller.animateCamera(
-                    CameraUpdate.newLatLngZoom(_currentLocation!, 17.0),
-                  );
-                }
-              },
-              child: const Icon(Icons.my_location_rounded, color: Colors.white),
-            ),
+          Selector<TrackingMetricsProvider, SessionStatus>(
+            selector: (_, p) => p.sessionStatus,
+            builder: (context, status, _) {
+              return Positioned(
+                bottom: (status == SessionStatus.idle 
+                    ? (95.0 + MediaQuery.of(context).padding.bottom) 
+                    : _bottomSheetHeight) + 16.0,
+                right: 16.0,
+                child: FloatingActionButton(
+                  backgroundColor: const Color(0xFF2196F3),
+                  onPressed: () async {
+                    _shouldFollowCamera = true;
+                    if (_currentLocation != null) {
+                      _isProgrammaticMovement = true;
+                      final controller = await _mapController.future;
+                      controller.animateCamera(
+                        CameraUpdate.newLatLngZoom(_currentLocation!, 17.0),
+                      );
+                    }
+                  },
+                  child: const Icon(Icons.my_location_rounded, color: Colors.white),
+                ),
+              );
+            },
           ),
 
           // 5. Sliding Bottom Sheet
-          _buildSlidingPanel(provider),
+          _buildSlidingPanel(trackingProvider),
         ],
       ),
     );
@@ -368,7 +378,7 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
-  Widget _buildNavigationDrawer(TurfSessionProvider provider) {
+  Widget _buildNavigationDrawer(LocationTrackingProvider provider) {
     return Drawer(
       backgroundColor: const Color(0xFF1E293B),
       child: Column(
@@ -425,17 +435,17 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
-  String _getCacheStateKey(TurfSessionProvider provider) {
+  String _getCacheStateKey(LocationTrackingProvider provider) {
     final claimedPart = provider.cachedClaimedLoops
         .map((c) => "${c.id}_${c.streakCount}_${c.coveredCountToday}")
         .join(",");
-    final capturedPart = provider.state.capturedLoops
+    final capturedPart = provider.capturedLoops
         .map((l) => "${l.id}_${l.name ?? ''}")
         .join(",");
     return "$claimedPart|$capturedPart";
   }
 
-  Future<void> _preCacheMarkers(TurfSessionProvider provider) async {
+  Future<void> _preCacheMarkers(LocationTrackingProvider provider) async {
     if (!mounted) return;
     final double pixelRatio = MediaQuery.of(context).devicePixelRatio;
     bool cacheUpdated = false;
@@ -460,7 +470,7 @@ class _MapScreenState extends State<MapScreen> {
     }
 
     // Pre-cache active captured loops if they are renamed but not claimed yet
-    for (var loop in provider.state.capturedLoops) {
+    for (var loop in provider.capturedLoops) {
       if (loop.name != null && loop.name!.isNotEmpty) {
         if (!_textMarkerCache.containsKey(loop.name!)) {
           try {
@@ -480,11 +490,11 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   /// Construct live tracking markers synchronously using cached assets
-  Set<Marker> _buildMarkersSync(TurfSessionProvider provider) {
+  Set<Marker> _buildMarkersSync(LocationTrackingProvider provider) {
     final Set<Marker> markers = {};
 
     // 1. User Position marker
-    final userPosition = _currentLocation ?? provider.state.trailPoints.lastOrNull;
+    final userPosition = _currentLocation ?? provider.trailPoints.lastOrNull;
     if (userPosition != null && _userIcon != null) {
       markers.add(
         Marker(
@@ -501,7 +511,7 @@ class _MapScreenState extends State<MapScreen> {
 
     // 2. Claimed loop label statistics cards
     final zoomInEnough = _currentZoom >= 15.5;
-    for (var loop in provider.state.capturedLoops) {
+    for (var loop in provider.capturedLoops) {
       final claimedIndex = provider.cachedClaimedLoops.indexWhere((c) => c.id == loop.id);
       if (claimedIndex != -1) {
         final claim = provider.cachedClaimedLoops[claimedIndex];
@@ -550,7 +560,7 @@ class _MapScreenState extends State<MapScreen> {
 
     // 3. Historical claimed loop cards
     for (var claim in provider.cachedClaimedLoops) {
-      if (provider.state.capturedLoops.any((l) => l.id == claim.id)) continue;
+      if (provider.capturedLoops.any((l) => l.id == claim.id)) continue;
 
       final center = _getMarkerNorthOffset(claim.points);
       
@@ -578,14 +588,14 @@ class _MapScreenState extends State<MapScreen> {
     return markers;
   }
 
-  Set<Polyline> _buildPolylines(TurfSessionState sessionState) {
+  Set<Polyline> _buildPolylines(LocationTrackingProvider provider) {
     final Set<Polyline> polylines = {};
-    if (sessionState.trailPoints.isNotEmpty) {
+    if (provider.trailPoints.isNotEmpty) {
       polylines.add(
         Polyline(
           polylineId: const PolylineId("active_trail"),
-          points: sessionState.trailPoints,
-          color: sessionState.activeTrailColor ?? const Color(0xFFE53935), // Red
+          points: provider.trailPoints,
+          color: provider.activeTrailColor ?? const Color(0xFFE53935), // Red
           width: 5,
           jointType: JointType.round,
           startCap: Cap.roundCap,
@@ -596,11 +606,11 @@ class _MapScreenState extends State<MapScreen> {
     return polylines;
   }
 
-  Set<Polygon> _buildPolygons(TurfSessionProvider provider) {
+  Set<Polygon> _buildPolygons(LocationTrackingProvider provider) {
     final Set<Polygon> polygons = {};
 
     // Render active captured loops
-    for (var loop in provider.state.capturedLoops) {
+    for (var loop in provider.capturedLoops) {
       final claimedIndex = provider.cachedClaimedLoops.indexWhere((c) => c.id == loop.id);
       Color color = const Color(0xFF4CAF50); // Unclaimed green
       if (claimedIndex != -1) {
@@ -628,7 +638,7 @@ class _MapScreenState extends State<MapScreen> {
 
     // Render historical claimed loop areas
     for (var claim in provider.cachedClaimedLoops) {
-      if (provider.state.capturedLoops.any((l) => l.id == claim.id)) continue;
+      if (provider.capturedLoops.any((l) => l.id == claim.id)) continue;
 
       final color = claim.getDynamicColor();
       polygons.add(
@@ -647,195 +657,197 @@ class _MapScreenState extends State<MapScreen> {
     return polygons;
   }
 
-  Widget _buildSlidingPanel(TurfSessionProvider provider) {
-    final sessionState = provider.state;
-    final minutes = sessionState.durationSeconds ~/ 60;
-    final seconds = sessionState.durationSeconds % 60;
-    final durationStr = "${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}";
-    final bool isIdle = sessionState.sessionStatus == SessionStatus.idle;
+  Widget _buildSlidingPanel(LocationTrackingProvider locationProvider) {
+    return Consumer<TrackingMetricsProvider>(
+      builder: (context, metricsProvider, child) {
+        final minutes = metricsProvider.durationSeconds ~/ 60;
+        final seconds = metricsProvider.durationSeconds % 60;
+        final durationStr = "${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}";
+        final bool isIdle = metricsProvider.sessionStatus == SessionStatus.idle;
 
-    return Positioned(
-      bottom: 0,
-      left: 0,
-      right: 0,
-      child: GestureDetector(
-        onVerticalDragUpdate: isIdle
-            ? null
-            : (details) {
-                setState(() {
-                  _bottomSheetHeight = (_bottomSheetHeight - details.delta.dy).clamp(_bottomSheetPeekHeight, _bottomSheetMaxHeight);
-                });
-              },
-        child: Container(
-          height: isIdle ? null : _bottomSheetHeight,
-          padding: EdgeInsets.fromLTRB(
-            20.0,
-            12.0,
-            20.0,
-            MediaQuery.of(context).padding.bottom + 14.0,
-          ),
-          decoration: const BoxDecoration(
-            color: Color(0xFF1E293B), // Premium Slate Dark
-            borderRadius: BorderRadius.vertical(top: Radius.circular(20.0)),
-            boxShadow: [BoxShadow(color: Colors.black38, blurRadius: 10, offset: Offset(0, -4))],
-          ),
-          child: SingleChildScrollView(
-            physics: const NeverScrollableScrollPhysics(),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                if (!isIdle) ...[
-                  // Drag Notch (only visible when panel is expandable)
-                  Center(
-                    child: Container(
-                      width: 36.0,
-                      height: 4.0,
-                      margin: const EdgeInsets.only(bottom: 12.0),
-                      decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(10)),
-                    ),
-                  ),
-                ],
-                // Session Status Specific buttons
-                if (isIdle)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 8.0, bottom: 8.0),
-                    child: ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF2196F3),
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        return Positioned(
+          bottom: 0,
+          left: 0,
+          right: 0,
+          child: GestureDetector(
+            onVerticalDragUpdate: isIdle
+                ? null
+                : (details) {
+                    setState(() {
+                      _bottomSheetHeight = (_bottomSheetHeight - details.delta.dy).clamp(_bottomSheetPeekHeight, _bottomSheetMaxHeight);
+                    });
+                  },
+            child: Container(
+              height: isIdle ? null : _bottomSheetHeight,
+              padding: EdgeInsets.fromLTRB(
+                20.0,
+                12.0,
+                20.0,
+                MediaQuery.of(context).padding.bottom + 14.0,
+              ),
+              decoration: const BoxDecoration(
+                color: Color(0xFF1E293B), // Premium Slate Dark
+                borderRadius: BorderRadius.vertical(top: Radius.circular(20.0)),
+                boxShadow: [BoxShadow(color: Colors.black38, blurRadius: 10, offset: Offset(0, -4))],
+              ),
+              child: SingleChildScrollView(
+                physics: const NeverScrollableScrollPhysics(),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (!isIdle) ...[
+                      // Drag Notch (only visible when panel is expandable)
+                      Center(
+                        child: Container(
+                          width: 36.0,
+                          height: 4.0,
+                          margin: const EdgeInsets.only(bottom: 12.0),
+                          decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(10)),
+                        ),
                       ),
-                      onPressed: () => provider.startWalk(),
-                      child: const Text("START WALK 🚶‍♂️", style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white)),
-                    ),
-                  )
-                else ...[
-                  // Metrics display row
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceAround,
-                    children: [
-                      _buildMetricWidget("Steps", "${sessionState.steps}${sessionState.isStepEstimated ? ' (est)' : ''}"),
-                      _buildMetricWidget("Distance", "${sessionState.distanceKm.toStringAsFixed(2)} km"),
-                      _buildMetricWidget("Loops", "${sessionState.loopCount}"),
                     ],
-                  ),
-                  const SizedBox(height: 12),
-                  // Extra Metrics row visible when sheet is expanded
-                  if (_bottomSheetHeight > 220) ...[
-                    const Divider(color: Colors.white12),
-                    const SizedBox(height: 8),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceAround,
-                      children: [
-                        _buildMetricWidget("Time", durationStr),
-                        _buildMetricWidget("Cadence", "${sessionState.cadence} SPM"),
-                        _buildMetricWidget("Elevation", "${sessionState.elevationGainMetres.toStringAsFixed(1)} m"),
+                    // Session Status Specific buttons
+                    if (isIdle)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8.0, bottom: 8.0),
+                        child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF2196F3),
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          ),
+                          onPressed: () => locationProvider.startWalk(),
+                          child: const Text("START WALK 🚶‍♂️", style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white)),
+                        ),
+                      )
+                    else ...[
+                      // Metrics display row
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceAround,
+                        children: [
+                          _buildMetricWidget("Steps", "${metricsProvider.steps}${metricsProvider.isStepEstimated ? ' (est)' : ''}"),
+                          _buildMetricWidget("Distance", "${metricsProvider.distanceKm.toStringAsFixed(2)} km"),
+                          _buildMetricWidget("Loops", "${metricsProvider.loopCount}"),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      // Extra Metrics row visible when sheet is expanded
+                      if (_bottomSheetHeight > 220) ...[
+                        const Divider(color: Colors.white12),
+                        const SizedBox(height: 8),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceAround,
+                          children: [
+                            _buildMetricWidget("Time", durationStr),
+                            _buildMetricWidget("Cadence", "${metricsProvider.cadence} SPM"),
+                            _buildMetricWidget("Elevation", "${metricsProvider.elevationGainMetres.toStringAsFixed(1)} m"),
+                          ],
+                        ),
+                        const SizedBox(height: 16),
                       ],
-                    ),
-                    const SizedBox(height: 16),
-                  ],
-                  // Active control action buttons
-                  Row(
-                    children: [
-                      Expanded(
-                        child: ElevatedButton(
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: sessionState.sessionStatus == SessionStatus.active ? Colors.grey[700] : const Color(0xFF2196F3),
-                            padding: const EdgeInsets.symmetric(vertical: 12),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                          ),
-                          onPressed: () {
-                            if (sessionState.sessionStatus == SessionStatus.active) {
-                              provider.pauseWalk();
-                            } else {
-                              provider.resumeWalk();
-                            }
-                          },
-                          child: Text(
-                            sessionState.sessionStatus == SessionStatus.active ? "Pause" : "Resume",
-                            style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: ElevatedButton(
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.red[600],
-                            padding: const EdgeInsets.symmetric(vertical: 12),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                          ),
-                          onPressed: () async {
-                            final stats = sessionState;
-                            final controller = await _mapController.future;
-
-                            // 1. Recenter/zoom to fit trail points bounds or user location before snapshot
-                            if (stats.trailPoints.isNotEmpty) {
-                              _isProgrammaticMovement = true;
-                              try {
-                                if (stats.trailPoints.length == 1) {
-                                  await controller.moveCamera(
-                                    CameraUpdate.newLatLngZoom(stats.trailPoints.first, 17.0),
-                                  );
+                      // Active control action buttons
+                      Row(
+                        children: [
+                          Expanded(
+                            child: ElevatedButton(
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: metricsProvider.sessionStatus == SessionStatus.active ? Colors.grey[700] : const Color(0xFF2196F3),
+                                padding: const EdgeInsets.symmetric(vertical: 12),
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                              ),
+                              onPressed: () {
+                                if (metricsProvider.sessionStatus == SessionStatus.active) {
+                                  locationProvider.pauseWalk();
                                 } else {
-                                  final bounds = _getBounds(stats.trailPoints);
-                                  await controller.moveCamera(
-                                    CameraUpdate.newLatLngBounds(bounds, 50.0),
-                                  );
+                                  locationProvider.resumeWalk();
                                 }
-                              } catch (e) {
-                                print("Camera bounds movement failed: $e");
+                              },
+                              child: Text(
+                                metricsProvider.sessionStatus == SessionStatus.active ? "Pause" : "Resume",
+                                style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: ElevatedButton(
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.red[600],
+                                padding: const EdgeInsets.symmetric(vertical: 12),
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                              ),
+                              onPressed: () async {
+                                final controller = await _mapController.future;
+
+                                // 1. Recenter/zoom to fit trail points bounds or user location before snapshot
+                                if (locationProvider.trailPoints.isNotEmpty) {
+                                  _isProgrammaticMovement = true;
+                                  try {
+                                    if (locationProvider.trailPoints.length == 1) {
+                                      await controller.moveCamera(
+                                        CameraUpdate.newLatLngZoom(locationProvider.trailPoints.first, 17.0),
+                                      );
+                                    } else {
+                                      final bounds = _getBounds(locationProvider.trailPoints);
+                                      await controller.moveCamera(
+                                        CameraUpdate.newLatLngBounds(bounds, 50.0),
+                                      );
+                                    }
+                                  } catch (e) {
+                                    print("Camera bounds movement failed: $e");
+                                    try {
+                                      await controller.moveCamera(
+                                        CameraUpdate.newLatLngZoom(locationProvider.trailPoints.last, 17.0),
+                                      );
+                                    } catch (_) {}
+                                  }
+                                }
+
+                                // 2. Wait 300ms for map tiles to redraw (matching native Android's delay)
+                                await Future.delayed(const Duration(milliseconds: 300));
+
+                                // 3. Take snapshot
+                                Uint8List? snapshotBytes;
                                 try {
-                                  await controller.moveCamera(
-                                    CameraUpdate.newLatLngZoom(stats.trailPoints.last, 17.0),
-                                  );
-                                } catch (_) {}
-                              }
-                            }
+                                  snapshotBytes = await controller.takeSnapshot();
+                                } catch (e) {
+                                  print("Failed to take map snapshot: $e");
+                                }
 
-                            // 2. Wait 300ms for map tiles to redraw (matching native Android's delay)
-                            await Future.delayed(const Duration(milliseconds: 300));
+                                // 4. End the walk session
+                                final summary = await locationProvider.endWalk();
 
-                            // 3. Take snapshot
-                            Uint8List? snapshotBytes;
-                            try {
-                              snapshotBytes = await controller.takeSnapshot();
-                            } catch (e) {
-                              print("Failed to take map snapshot: $e");
-                            }
-
-                            // 4. End the walk session
-                            final summary = await provider.endWalk();
-
-                            // 5. Show summary bottom sheet
-                            if (summary != null) {
-                              if (mounted) {
-                                SummaryBottomSheet.show(
-                                  context: context,
-                                  mapSnapshot: snapshotBytes,
-                                  steps: stats.steps,
-                                  isStepEstimated: stats.isStepEstimated,
-                                  distanceKm: stats.distanceKm,
-                                  loops: stats.loopCount,
-                                  durationSeconds: summary.durationSeconds,
-                                  cadence: stats.cadence,
-                                  elevationGainMetres: stats.elevationGainMetres,
-                                  onDone: () => setState(() {}),
-                                );
-                              }
-                            }
-                          },
-                          child: const Text("End Walk", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white)),
-                        ),
-                      ),
+                                // 5. Show summary bottom sheet
+                                if (summary != null) {
+                                  if (mounted) {
+                                    SummaryBottomSheet.show(
+                                      context: context,
+                                      mapSnapshot: snapshotBytes,
+                                      steps: metricsProvider.steps,
+                                      isStepEstimated: metricsProvider.isStepEstimated,
+                                      distanceKm: metricsProvider.distanceKm,
+                                      loops: metricsProvider.loopCount,
+                                      durationSeconds: summary.durationSeconds,
+                                      cadence: metricsProvider.cadence,
+                                      elevationGainMetres: metricsProvider.elevationGainMetres,
+                                      onDone: () => setState(() {}),
+                                    );
+                                  }
+                                }
+                              },
+                              child: const Text("End Walk", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white)),
+                            ),
+                          ),
+                        ],
+                      )
                     ],
-                  )
-                ],
-              ],
+                  ],
+                ),
+              ),
             ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 
@@ -960,7 +972,7 @@ class _MapScreenState extends State<MapScreen> {
             onPressed: () {
               final name = textController.text.trim();
               if (name.isNotEmpty) {
-                Provider.of<TurfSessionProvider>(context, listen: false).nameLoop(loop.id, name);
+                Provider.of<LocationTrackingProvider>(context, listen: false).nameLoop(loop.id, name);
                 Navigator.pop(context);
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(content: Text("Loop claimed as: $name")),
@@ -1016,7 +1028,7 @@ class _MapScreenState extends State<MapScreen> {
                     ElevatedButton(
                       style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
                       onPressed: () {
-                        Provider.of<TurfSessionProvider>(context, listen: false).abandonClaim(claim.id);
+                        Provider.of<LocationTrackingProvider>(context, listen: false).abandonClaim(claim.id);
                         Navigator.pop(ctx); // Close confirmation
                         Navigator.pop(context); // Close detail dialog
                       },
@@ -1036,7 +1048,7 @@ class _MapScreenState extends State<MapScreen> {
             onPressed: () {
               final newName = textController.text.trim();
               if (newName.isNotEmpty) {
-                Provider.of<TurfSessionProvider>(context, listen: false).nameLoop(claim.id, newName);
+                Provider.of<LocationTrackingProvider>(context, listen: false).nameLoop(claim.id, newName);
                 Navigator.pop(context);
               }
             },

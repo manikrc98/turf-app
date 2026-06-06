@@ -4,12 +4,28 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:path_provider/path_provider.dart';
 
-import 'providers/turf_session_provider.dart';
-import 'screens/map_screen.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
-void main() {
+import 'providers/tracking_metrics_provider.dart';
+import 'providers/location_tracking_provider.dart';
+import 'providers/supabase_sync_provider.dart';
+import 'screens/map_screen.dart';
+import 'location/background_service.dart';
+
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   setupCrashLogger();
+  await initializeBackgroundService();
+  
+  try {
+    await Supabase.initialize(
+      url: 'https://placeholder.supabase.co',
+      anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.placeholder.placeholder',
+    );
+  } catch (e) {
+    print("Supabase initialization skipped or failed: $e");
+  }
+  
   runApp(const TurfApp());
 }
 
@@ -46,9 +62,12 @@ class TurfApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final metricsProvider = TrackingMetricsProvider();
     return MultiProvider(
       providers: [
-        ChangeNotifierProvider(create: (_) => TurfSessionProvider()),
+        ChangeNotifierProvider.value(value: metricsProvider),
+        ChangeNotifierProvider(create: (_) => LocationTrackingProvider(metricsProvider: metricsProvider)),
+        ChangeNotifierProvider(create: (_) => SupabaseSyncProvider()),
       ],
       child: MaterialApp(
         title: 'TURF Walk Tracker',

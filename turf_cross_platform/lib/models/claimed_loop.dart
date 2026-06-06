@@ -8,6 +8,10 @@ class ClaimedLoop {
   final int streakCount;
   final String lastCoveredDate; // "yyyy-MM-dd"
   final int coveredCountToday;
+  
+  final String ownerId;
+  final String ownerName;
+  final bool isMyClaim;
 
   ClaimedLoop({
     required this.id,
@@ -16,10 +20,17 @@ class ClaimedLoop {
     required this.streakCount,
     required this.lastCoveredDate,
     required this.coveredCountToday,
+    this.ownerId = "",
+    this.ownerName = "",
+    this.isMyClaim = true,
   });
 
   /// Get the dynamic color for this claimed loop
   Color getDynamicColor() {
+    if (!isMyClaim) {
+      // Enemy territory color: Sleek competitive purple/magenta
+      return const Color(0xFF9C27B0);
+    }
     return getDynamicColorForCompletions(coveredCountToday);
   }
 
@@ -31,6 +42,9 @@ class ClaimedLoop {
     int? streakCount,
     String? lastCoveredDate,
     int? coveredCountToday,
+    String? ownerId,
+    String? ownerName,
+    bool? isMyClaim,
   }) {
     return ClaimedLoop(
       id: id ?? this.id,
@@ -39,6 +53,9 @@ class ClaimedLoop {
       streakCount: streakCount ?? this.streakCount,
       lastCoveredDate: lastCoveredDate ?? this.lastCoveredDate,
       coveredCountToday: coveredCountToday ?? this.coveredCountToday,
+      ownerId: ownerId ?? this.ownerId,
+      ownerName: ownerName ?? this.ownerName,
+      isMyClaim: isMyClaim ?? this.isMyClaim,
     );
   }
 
@@ -56,6 +73,9 @@ class ClaimedLoop {
       streakCount: json['streakCount'] as int,
       lastCoveredDate: json['lastCoveredDate'] as String,
       coveredCountToday: json['coveredCountToday'] as int,
+      ownerId: (json['ownerId'] as String?) ?? "",
+      ownerName: (json['ownerName'] as String?) ?? "",
+      isMyClaim: (json['isMyClaim'] as bool?) ?? true,
     );
   }
 
@@ -68,6 +88,9 @@ class ClaimedLoop {
       'streakCount': streakCount,
       'lastCoveredDate': lastCoveredDate,
       'coveredCountToday': coveredCountToday,
+      'ownerId': ownerId,
+      'ownerName': ownerName,
+      'isMyClaim': isMyClaim,
     };
   }
 
