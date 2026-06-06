@@ -111,9 +111,9 @@ void onStart(ServiceInstance service) async {
   int stepBaseline = -1;
 
   // Notification helper
-  void updateNotification(String content) {
+  Future<void> updateNotification(String content) async {
     if (service is AndroidServiceInstance) {
-      if (service.isForegroundService) {
+      if (await (service as AndroidServiceInstance).isForegroundService()) {
         flutterLocalNotificationsPlugin.show(
           notificationId,
           'TURF Live Tracking',

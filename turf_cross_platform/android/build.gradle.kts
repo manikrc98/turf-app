@@ -19,6 +19,42 @@ subprojects {
     project.evaluationDependsOn(":app")
 }
 
+subprojects {
+    val configureAndroid = {
+        val android = project.extensions.findByName("android")
+        if (android != null) {
+            try {
+                // Force compileSdkVersion to 36 to satisfy AGP 36+ dependency requirements
+                try {
+                    val compileSdkVersion = android.javaClass.getMethod("compileSdkVersion", Int::class.java)
+                    compileSdkVersion.invoke(android, 36)
+                } catch (e: Exception) {
+                    try {
+                        val setCompileSdk = android.javaClass.getMethod("setCompileSdk", Int::class.java)
+                        setCompileSdk.invoke(android, 36)
+                    } catch (e2: Exception) {}
+                }
+
+                val getNamespace = android.javaClass.getMethod("getNamespace")
+                if (getNamespace.invoke(android) == null) {
+                    val setNamespace = android.javaClass.getMethod("setNamespace", String::class.java)
+                    val derivedNamespace = "dev.isar.${project.name.replace(Regex("[^a-zA-Z0-9_]"), "_")}"
+                    setNamespace.invoke(android, derivedNamespace)
+                }
+            } catch (e: Exception) {
+                // Ignore if methods are not present in older AGP versions
+            }
+        }
+    }
+    if (project.state.executed) {
+        configureAndroid()
+    } else {
+        project.afterEvaluate {
+            configureAndroid()
+        }
+    }
+}
+
 tasks.register<Delete>("clean") {
     delete(rootProject.layout.buildDirectory)
 }
