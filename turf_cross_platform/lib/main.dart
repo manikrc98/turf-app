@@ -19,8 +19,8 @@ void main() async {
   
   try {
     await Supabase.initialize(
-      url: 'https://placeholder.supabase.co',
-      anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.placeholder.placeholder',
+      url: 'https://ywzanyqlvqkibhfgbqrr.supabase.co',
+      anonKey: 'sb_publishable__-8a1-Lp1WU6VuePjAhGZQ_x4q6pdEp',
     );
   } catch (e) {
     print("Supabase initialization skipped or failed: $e");
