@@ -245,8 +245,10 @@ void onStart(ServiceInstance service) async {
     }
 
     // Check loop closure mathematics
-    if (LoopDetector.isLoopClosed(trailPoints)) {
-      final newLoop = TurfLoop(id: const Uuid().v4(), points: List<LatLng>.from(trailPoints));
+    final int closureIndex = LoopDetector.findLoopClosureIndex(trailPoints);
+    if (closureIndex != -1) {
+      final loopPoints = trailPoints.sublist(closureIndex);
+      final newLoop = TurfLoop(id: const Uuid().v4(), points: List<LatLng>.from(loopPoints));
 
       // Get claim matches
       final localClaims = await isar.localClaimedLoops.where().findAll();
@@ -260,7 +262,7 @@ void onStart(ServiceInstance service) async {
         }
 
         bool isClose = false;
-        for (var newPt in trailPoints) {
+        for (var newPt in loopPoints) {
           for (var claimedPt in pts) {
             final double dist = LoopDetector.calculateDistanceMetres(
               newPt.latitude, newPt.longitude,

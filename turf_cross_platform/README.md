@@ -26,7 +26,8 @@ To enable high-accuracy location tracking and physical step counting, you must a
 Ensure the following permissions and features are declared in your manifest:
 
 ```xml
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+          xmlns:tools="http://schemas.google.com/tools">
     <!-- GPS & Location Permissions -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
@@ -50,9 +51,10 @@ Ensure the following permissions and features are declared in your manifest:
             
         <!-- Background Service Runner -->
         <service
-            android:name="com.pravera.flutter_background_service.BackgroundService"
+            android:name="id.flutter.flutter_background_service.BackgroundService"
             android:enabled="true"
-            android:exported="false"
+            android:exported="true"
+            tools:replace="android:exported"
             android:foregroundServiceType="location" />
     </application>
 </manifest>

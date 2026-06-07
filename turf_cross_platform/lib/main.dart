@@ -10,6 +10,7 @@ import 'providers/tracking_metrics_provider.dart';
 import 'providers/location_tracking_provider.dart';
 import 'providers/supabase_sync_provider.dart';
 import 'screens/map_screen.dart';
+import 'screens/welcome_screen.dart';
 import 'location/background_service.dart';
 
 void main() async {
@@ -100,8 +101,48 @@ class TurfApp extends StatelessWidget {
             elevation: 0,
           ),
         ),
-        home: const MapScreen(),
+        home: const AuthWrapper(),
       ),
+    );
+  }
+}
+
+class AuthWrapper extends StatefulWidget {
+  const AuthWrapper({super.key});
+
+  @override
+  State<AuthWrapper> createState() => _AuthWrapperState();
+}
+
+class _AuthWrapperState extends State<AuthWrapper> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      Provider.of<SupabaseSyncProvider>(context, listen: false).initializeAndAuth();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Consumer<SupabaseSyncProvider>(
+      builder: (context, syncProv, _) {
+        if (!syncProv.initialized) {
+          return const Scaffold(
+            backgroundColor: Color(0xFF0F172A),
+            body: Center(
+              child: CircularProgressIndicator(color: Color(0xFF2196F3)),
+            ),
+          );
+        }
+
+        final bool isGoogleLoggedIn = syncProv.currentUserId != null && syncProv.isGoogleUser;
+        if (isGoogleLoggedIn) {
+          return const MapScreen();
+        } else {
+          return const WelcomeScreen();
+        }
+      },
     );
   }
 }

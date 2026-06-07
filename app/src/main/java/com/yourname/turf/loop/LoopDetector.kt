@@ -4,24 +4,38 @@ import com.google.android.gms.maps.model.LatLng
 import kotlin.math.*
 
 object LoopDetector {
-    const val LOOP_THRESHOLD_METRES = 10f
+    const val LOOP_THRESHOLD_METRES = 15f
     const val MIN_TRAIL_POINTS = 20
 
     /**
-     * Checks if the last point in [trailPoints] closes a loop back to the first point of the trail.
+     * Checks if the last point in [trailPoints] closes a loop.
      */
     fun isLoopClosed(trailPoints: List<LatLng>): Boolean {
-        if (trailPoints.size <= MIN_TRAIL_POINTS) return false
+        return findLoopClosureIndex(trailPoints) != -1
+    }
 
-        val startPoint = trailPoints.first()
+    /**
+     * Finds the index of the point where the loop closes (i.e. the last point is close to a historical point).
+     * Only checks points up to `trailPoints.size - MIN_TRAIL_POINTS` to avoid false closures on consecutive points.
+     * Returns -1 if no loop is detected.
+     */
+    fun findLoopClosureIndex(trailPoints: List<LatLng>): Int {
+        if (trailPoints.size <= MIN_TRAIL_POINTS) return -1
+
         val newPoint = trailPoints.last()
+        val searchLimit = trailPoints.size - MIN_TRAIL_POINTS
 
-        val distance = calculateDistanceMetres(
-            startPoint.latitude, startPoint.longitude,
-            newPoint.latitude, newPoint.longitude
-        )
-
-        return distance < LOOP_THRESHOLD_METRES
+        for (i in 0..searchLimit) {
+            val historicalPoint = trailPoints[i]
+            val distance = calculateDistanceMetres(
+                historicalPoint.latitude, historicalPoint.longitude,
+                newPoint.latitude, newPoint.longitude
+            )
+            if (distance < LOOP_THRESHOLD_METRES) {
+                return i
+            }
+        }
+        return -1
     }
 
     /**

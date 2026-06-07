@@ -2,22 +2,34 @@ import 'dart:math';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 class LoopDetector {
-  static const double loopThresholdMetres = 10.0;
+  static const double loopThresholdMetres = 15.0;
   static const int minTrailPoints = 20;
 
-  /// Checks if the last point in [trailPoints] closes a loop back to the first point of the trail.
+  /// Checks if the last point in [trailPoints] closes a loop.
   static bool isLoopClosed(List<LatLng> trailPoints) {
-    if (trailPoints.length <= minTrailPoints) return false;
+    return findLoopClosureIndex(trailPoints) != -1;
+  }
 
-    final startPoint = trailPoints.first;
+  /// Finds the index of the point where the loop closes (i.e. the last point is close to a historical point).
+  /// Only checks points up to `trailPoints.length - minTrailPoints` to avoid false closures on consecutive points.
+  /// Returns -1 if no loop is detected.
+  static int findLoopClosureIndex(List<LatLng> trailPoints) {
+    if (trailPoints.length <= minTrailPoints) return -1;
+
     final newPoint = trailPoints.last;
+    final int searchLimit = trailPoints.length - minTrailPoints;
 
-    final distance = calculateDistanceMetres(
-      startPoint.latitude, startPoint.longitude,
-      newPoint.latitude, newPoint.longitude
-    );
-
-    return distance < loopThresholdMetres;
+    for (int i = 0; i <= searchLimit; i++) {
+      final historicalPoint = trailPoints[i];
+      final distance = calculateDistanceMetres(
+        historicalPoint.latitude, historicalPoint.longitude,
+        newPoint.latitude, newPoint.longitude
+      );
+      if (distance < loopThresholdMetres) {
+        return i;
+      }
+    }
+    return -1;
   }
 
   /// Haversine formula to compute distance between two coordinates in metres

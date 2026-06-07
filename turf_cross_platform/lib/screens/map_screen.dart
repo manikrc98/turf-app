@@ -9,12 +9,16 @@ import 'package:provider/provider.dart';
 
 import '../providers/tracking_metrics_provider.dart';
 import '../providers/location_tracking_provider.dart';
+import '../providers/supabase_sync_provider.dart';
 import '../models/session_status.dart';
 import '../models/turf_loop.dart';
 import '../models/claimed_loop.dart';
+import '../models/local_walk_session.dart';
+import '../repositories/isar_service.dart';
 import 'history_bottom_sheet.dart';
 import 'summary_bottom_sheet.dart';
 import 'marker_generator.dart';
+import 'package:isar/isar.dart';
 
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key});
@@ -107,8 +111,8 @@ class _MapScreenState extends State<MapScreen> {
       _showClaimLoopDialog(loop);
     });
 
-    // Listen for streak updates on claimed loops
-    _claimedLoopCoveredSubscription = provider.claimedLoopCoveredEvents.listen((claim) {
+    // Listen for streak updates on claimed loops and sync to Supabase
+    _claimedLoopCoveredSubscription = provider.claimedLoopCoveredEvents.listen((claim) async {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
@@ -119,6 +123,12 @@ class _MapScreenState extends State<MapScreen> {
           duration: const Duration(seconds: 4),
         ),
       );
+
+      final syncProvider = Provider.of<SupabaseSyncProvider>(context, listen: false);
+      if (syncProvider.currentUserId != null) {
+        await syncProvider.attemptClaimLoop(claim.points, claim.name);
+        await provider.loadClaimedLoops();
+      }
     });
   }
 
@@ -378,21 +388,103 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
+  Widget _buildDrawerHeader() {
+    return Container(
+      padding: EdgeInsets.fromLTRB(16, 24 + MediaQuery.of(context).padding.top, 16, 20),
+      color: const Color(0xFF0F172A),
+      width: double.infinity,
+      child: Consumer<SupabaseSyncProvider>(
+        builder: (context, syncProv, _) {
+          final bool isLoggedIn = syncProv.currentUserId != null;
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  CircleAvatar(
+                    radius: 28,
+                    backgroundColor: const Color(0xFF1E293B),
+                    backgroundImage: isLoggedIn && syncProv.currentUsername != null
+                        ? NetworkImage('https://api.dicebear.com/7.x/bottts/png?seed=${syncProv.currentUsername}')
+                        : null,
+                    child: !isLoggedIn
+                        ? const Icon(Icons.account_circle, size: 56, color: Colors.white30)
+                        : null,
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          isLoggedIn ? (syncProv.currentUsername ?? "User") : "Guest Mode",
+                          style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+                        ),
+                        Text(
+                          isLoggedIn ? "Signed in 🏆" : "Offline-first play",
+                          style: const TextStyle(color: Colors.white54, fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              if (syncProv.isSyncing)
+                const SizedBox(
+                  height: 36,
+                  child: Center(child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF2196F3))),
+                )
+              else if (!isLoggedIn)
+                Row(
+                  children: [
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF2196F3),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                          padding: const EdgeInsets.symmetric(vertical: 8),
+                        ),
+                        icon: const Icon(Icons.login_rounded, size: 16, color: Colors.white),
+                        label: const Text("Sign In with Google", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white)),
+                        onPressed: () async {
+                          final success = await syncProv.signInWithGoogle();
+                          if (!success) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text("Google Sign-In failed or cancelled.")),
+                            );
+                          }
+                        },
+                      ),
+                    ),
+                  ],
+                )
+              else
+                OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.redAccent,
+                    side: const BorderSide(color: Colors.redAccent),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  ),
+                  icon: const Icon(Icons.logout_rounded, size: 14),
+                  label: const Text("Sign Out", style: TextStyle(fontSize: 11)),
+                  onPressed: () => syncProv.signOut(),
+                ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+
   Widget _buildNavigationDrawer(LocationTrackingProvider provider) {
     return Drawer(
       backgroundColor: const Color(0xFF1E293B),
       child: Column(
         children: [
-          DrawerHeader(
-            decoration: const BoxDecoration(color: Color(0xFF0F172A)),
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: const Text(
-                "TURF App 🏆",
-                style: TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold),
-              ),
-            ),
-          ),
+          _buildDrawerHeader(),
           ListTile(
             leading: const Icon(Icons.map_rounded, color: Colors.white70),
             title: const Text("Track Walk", style: TextStyle(color: Colors.white)),
@@ -415,6 +507,39 @@ class _MapScreenState extends State<MapScreen> {
               Navigator.pop(context);
               _showVersionHistoryDialog();
             },
+          ),
+          ExpansionTile(
+            leading: const Icon(Icons.stars_rounded, color: Colors.amber),
+            title: const Text("Claimed Loops", style: TextStyle(color: Colors.white)),
+            iconColor: Colors.white70,
+            collapsedIconColor: Colors.white54,
+            childrenPadding: const EdgeInsets.symmetric(horizontal: 16.0),
+            children: [
+              if (provider.cachedClaimedLoops.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.all(12.0),
+                  child: Text("No claimed loops yet", style: TextStyle(color: Colors.white30, fontSize: 13)),
+                )
+              else
+                ...provider.cachedClaimedLoops.map((claim) {
+                  return ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(claim.name, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w500)),
+                    subtitle: Text(claim.isMyClaim ? "Owned by me" : "Claimed by: ${claim.ownerName}", style: const TextStyle(color: Colors.white54, fontSize: 11)),
+                    trailing: const Icon(Icons.chevron_right_rounded, color: Colors.white30, size: 16),
+                    onTap: () async {
+                      Navigator.pop(context); // Close drawer
+                      final centroid = _getCentroid(claim.points);
+                      final controller = await _mapController.future;
+                      _shouldFollowCamera = false;
+                      _isProgrammaticMovement = true;
+                      await controller.animateCamera(CameraUpdate.newLatLngZoom(centroid, 17.0));
+                      _showClaimedLoopDetailDialog(claim);
+                    },
+                  );
+                }).toList(),
+            ],
           ),
           const Spacer(),
           GestureDetector(
@@ -819,6 +944,27 @@ class _MapScreenState extends State<MapScreen> {
 
                                 // 5. Show summary bottom sheet
                                 if (summary != null) {
+                                  final syncProvider = Provider.of<SupabaseSyncProvider>(context, listen: false);
+                                  if (syncProvider.currentUserId != null) {
+                                    // Upload to Supabase and mark as synced locally
+                                    await syncProvider.syncCompletedWalk(summary);
+                                    try {
+                                      final isar = await IsarService.getDB();
+                                      final localSession = await isar.localWalkSessions
+                                          .filter()
+                                          .sessionIdEqualTo(summary.id)
+                                          .findFirst();
+                                      if (localSession != null) {
+                                        localSession.isSynced = true;
+                                        await isar.writeTxn(() async {
+                                          await isar.localWalkSessions.put(localSession);
+                                        });
+                                      }
+                                    } catch (e) {
+                                      print("Failed to mark walk session as synced locally: $e");
+                                    }
+                                  }
+
                                   if (mounted) {
                                     SummaryBottomSheet.show(
                                       context: context,
@@ -969,14 +1115,35 @@ class _MapScreenState extends State<MapScreen> {
             child: const Text("Dismiss"),
           ),
           ElevatedButton(
-            onPressed: () {
+            onPressed: () async {
               final name = textController.text.trim();
               if (name.isNotEmpty) {
-                Provider.of<LocationTrackingProvider>(context, listen: false).nameLoop(loop.id, name);
+                final syncProvider = Provider.of<SupabaseSyncProvider>(context, listen: false);
+                final trackingProvider = Provider.of<LocationTrackingProvider>(context, listen: false);
+
                 Navigator.pop(context);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text("Loop claimed as: $name")),
-                );
+
+                if (syncProvider.currentUserId != null) {
+                  // Online sync claim
+                  final res = await syncProvider.attemptClaimLoop(loop.points, name);
+                  if (res != null) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text("Loop claimed on backend: $name")),
+                    );
+                    await trackingProvider.loadClaimedLoops();
+                  } else {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text("Failed to claim loop on backend. Saved locally.")),
+                    );
+                    await trackingProvider.nameLoop(loop.id, name);
+                  }
+                } else {
+                  // Offline guest claim
+                  await trackingProvider.nameLoop(loop.id, name);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text("Loop claimed locally as: $name")),
+                  );
+                }
               }
             },
             child: const Text("Claim"),
@@ -992,68 +1159,76 @@ class _MapScreenState extends State<MapScreen> {
       context: context,
       builder: (context) => AlertDialog(
         backgroundColor: const Color(0xFF1E293B),
-        title: Text("Claimed Loop: ${claim.name} 🏆", style: const TextStyle(color: Colors.white)),
+        title: Text(claim.isMyClaim ? "Claimed Loop: ${claim.name} 🏆" : "Claimed Loop: ${claim.name}", style: const TextStyle(color: Colors.white)),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text("🔥 Streak: ${claim.streakCount} days", style: const TextStyle(color: Colors.white70)),
-            Text("🔄 Covered today: ${claim.coveredCountToday} times", style: const TextStyle(color: Colors.white70)),
-            Text("📅 Last covered: ${claim.lastCoveredDate}", style: const TextStyle(color: Colors.white70)),
-            const SizedBox(height: 16),
-            const Text("Rename claimed loop:", style: TextStyle(color: Colors.white54, fontSize: 13)),
-            TextField(
-              controller: textController,
-              style: const TextStyle(color: Colors.white),
-              decoration: const InputDecoration(
-                enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.white30)),
-                focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: Color(0xFF2196F3))),
-              ),
-            )
+            if (claim.isMyClaim) ...[
+              Text("🔥 Streak: ${claim.streakCount} days", style: const TextStyle(color: Colors.white70)),
+              Text("🔄 Covered today: ${claim.coveredCountToday} times", style: const TextStyle(color: Colors.white70)),
+              Text("📅 Last covered: ${claim.lastCoveredDate}", style: const TextStyle(color: Colors.white70)),
+              const SizedBox(height: 16),
+              const Text("Rename claimed loop:", style: TextStyle(color: Colors.white54, fontSize: 13)),
+              TextField(
+                controller: textController,
+                style: const TextStyle(color: Colors.white),
+                decoration: const InputDecoration(
+                  enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.white30)),
+                  focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: Color(0xFF2196F3))),
+                ),
+              )
+            ] else ...[
+              Text("Claimed by: ${claim.ownerName.isEmpty ? 'Enemy Player' : claim.ownerName} 👤", style: const TextStyle(color: Colors.white70, fontSize: 16, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              const Text("This is competitive territory! Recover this loop to claim it.", style: TextStyle(color: Colors.white38, fontSize: 12)),
+            ]
           ],
         ),
         actions: [
-          TextButton(
-            style: TextButton.styleFrom(foregroundColor: Colors.redAccent),
-            onPressed: () {
-              // Confirm Abandon
-              showDialog(
-                context: context,
-                builder: (ctx) => AlertDialog(
-                  backgroundColor: const Color(0xFF1E293B),
-                  title: const Text("Abandon Claim?", style: TextStyle(color: Colors.white)),
-                  content: Text("Are you sure you want to abandon the claim on '${claim.name}'? Your streak will be lost.", style: const TextStyle(color: Colors.white70)),
-                  actions: [
-                    TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cancel")),
-                    ElevatedButton(
-                      style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-                      onPressed: () {
-                        Provider.of<LocationTrackingProvider>(context, listen: false).abandonClaim(claim.id);
-                        Navigator.pop(ctx); // Close confirmation
-                        Navigator.pop(context); // Close detail dialog
-                      },
-                      child: const Text("Yes, Abandon"),
-                    )
-                  ],
-                ),
-              );
-            },
-            child: const Text("Abandon Claim"),
-          ),
+          if (claim.isMyClaim)
+            TextButton(
+              style: TextButton.styleFrom(foregroundColor: Colors.redAccent),
+              onPressed: () {
+                // Confirm Abandon
+                showDialog(
+                  context: context,
+                  builder: (ctx) => AlertDialog(
+                    backgroundColor: const Color(0xFF1E293B),
+                    title: const Text("Abandon Claim?", style: TextStyle(color: Colors.white)),
+                    content: Text("Are you sure you want to abandon the claim on '${claim.name}'? Your streak will be lost.", style: const TextStyle(color: Colors.white70)),
+                    actions: [
+                      TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cancel")),
+                      ElevatedButton(
+                        style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+                        onPressed: () {
+                          Provider.of<LocationTrackingProvider>(context, listen: false).abandonClaim(claim.id);
+                          Navigator.pop(ctx); // Close confirmation
+                          Navigator.pop(context); // Close detail dialog
+                        },
+                        child: const Text("Yes, Abandon"),
+                      )
+                    ],
+                  ),
+                );
+              },
+              child: const Text("Abandon Claim"),
+            ),
           TextButton(
             onPressed: () => Navigator.pop(context),
             child: const Text("Close"),
           ),
-          ElevatedButton(
-            onPressed: () {
-              final newName = textController.text.trim();
-              if (newName.isNotEmpty) {
-                Provider.of<LocationTrackingProvider>(context, listen: false).nameLoop(claim.id, newName);
-                Navigator.pop(context);
-              }
-            },
-            child: const Text("Save"),
-          )
+          if (claim.isMyClaim)
+            ElevatedButton(
+              onPressed: () {
+                final newName = textController.text.trim();
+                if (newName.isNotEmpty) {
+                  Provider.of<LocationTrackingProvider>(context, listen: false).nameLoop(claim.id, newName);
+                  Navigator.pop(context);
+                }
+              },
+              child: const Text("Save"),
+            )
         ],
       ),
     );

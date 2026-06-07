@@ -290,11 +290,13 @@ class TurfTrackerService : LifecycleService() {
             val updatedTrail = state.trailPoints + newLatLng
             
             // Check loop closure
-            if (LoopDetector.isLoopClosed(updatedTrail)) {
+            val closureIndex = LoopDetector.findLoopClosureIndex(updatedTrail)
+            if (closureIndex != -1) {
                 triggerHapticFeedback()
-                val newLoop = com.yourname.turf.model.TurfLoop(points = updatedTrail)
+                val loopPoints = updatedTrail.subList(closureIndex, updatedTrail.size)
+                val newLoop = com.yourname.turf.model.TurfLoop(points = loopPoints)
                 
-                val matchingClaimed = getMatchingClaimedLoopForNewLoop(updatedTrail)
+                val matchingClaimed = getMatchingClaimedLoopForNewLoop(loopPoints)
                 val loopToSave: com.yourname.turf.model.TurfLoop
                 
                 if (matchingClaimed != null) {

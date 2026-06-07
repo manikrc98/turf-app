@@ -33,9 +33,10 @@ CREATE INDEX IF NOT EXISTS loops_centroid_idx ON public.loops USING GIST (centro
 ALTER TABLE public.loops ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Allow public read on loops" ON public.loops FOR SELECT USING (true);
 CREATE POLICY "Allow users to create loops" ON public.loops FOR INSERT WITH CHECK (auth.uid() = created_by);
+CREATE POLICY "Allow users to update own loops" ON public.loops FOR UPDATE USING (auth.uid() = created_by);
 
 -- 3. Competitive Loop Claims Table (Single Owner Competitive Claiming)
-CREATE TABLE IF NOT EXISTS public.claims (
+CREATE TABLE IF NOT EXISTS public.claims_all (
     loop_id UUID REFERENCES public.loops(id) ON DELETE CASCADE PRIMARY KEY, -- Enforces single claim per loop!
     user_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE NOT NULL,
     streak_count INTEGER DEFAULT 1 NOT NULL,
@@ -44,12 +45,27 @@ CREATE TABLE IF NOT EXISTS public.claims (
     claimed_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS claims_user_idx ON public.claims (user_id);
+CREATE INDEX IF NOT EXISTS claims_user_idx ON public.claims_all (user_id);
 
 -- Enable RLS for Claims
-ALTER TABLE public.claims ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "Allow public read on claims" ON public.claims FOR SELECT USING (true);
-CREATE POLICY "Allow users to upsert claims" ON public.claims FOR ALL USING (true);
+ALTER TABLE public.claims_all ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Allow users to delete own claims" ON public.claims_all FOR DELETE USING (auth.uid() = user_id);
+
+-- Expose public claims view that conditionally exposes private statistics
+CREATE OR REPLACE VIEW public.claims AS
+SELECT 
+    loop_id,
+    user_id,
+    claimed_at,
+    CASE WHEN (auth.uid() = user_id) THEN streak_count ELSE NULL END AS streak_count,
+    CASE WHEN (auth.uid() = user_id) THEN last_covered_date ELSE NULL END AS last_covered_date,
+    CASE WHEN (auth.uid() = user_id) THEN covered_count_today ELSE NULL END AS covered_count_today
+FROM public.claims_all;
+
+-- Grant permissions on the view and base table
+GRANT SELECT ON public.claims TO anon, authenticated, service_role;
+GRANT DELETE ON public.claims TO authenticated;
+GRANT DELETE ON public.claims_all TO authenticated;
 
 -- 4. Walk Sessions Table (Completed user walks)
 CREATE TABLE IF NOT EXISTS public.walk_sessions (
@@ -136,12 +152,12 @@ BEGIN
     -- 3. Handle claiming or matching logic
     IF v_matched_loop_id IS NOT NULL THEN
         -- Loop exists: Check if claimed
-        SELECT EXISTS(SELECT 1 FROM public.claims WHERE loop_id = v_matched_loop_id) INTO v_claim_exists;
+        SELECT EXISTS(SELECT 1 FROM public.claims_all WHERE loop_id = v_matched_loop_id) INTO v_claim_exists;
         
         IF v_claim_exists THEN
             SELECT user_id, streak_count, last_covered_date, covered_count_today 
             INTO v_claim_owner, v_claim_streak, v_claim_last_date, v_claim_covered_today
-            FROM public.claims 
+            FROM public.claims_all 
             WHERE loop_id = v_matched_loop_id;
             
             IF v_claim_owner = p_user_id THEN
@@ -158,7 +174,7 @@ BEGIN
                     v_claim_covered_today := 1;
                 END IF;
                 
-                UPDATE public.claims 
+                UPDATE public.claims_all 
                 SET streak_count = v_claim_streak,
                     last_covered_date = v_claim_last_date,
                     covered_count_today = v_claim_covered_today
@@ -169,7 +185,7 @@ BEGIN
                 -- Different owner: Check if streak is broken (last covered older than yesterday)
                 IF v_claim_last_date < (CURRENT_DATE - INTERVAL '1 day')::DATE THEN
                     -- Takeover: Capture loop!
-                    UPDATE public.claims 
+                    UPDATE public.claims_all 
                     SET user_id = p_user_id,
                         streak_count = 1,
                         last_covered_date = CURRENT_DATE,
@@ -185,7 +201,7 @@ BEGIN
             END IF;
         ELSE
             -- Loop exists but unclaimed: Claim it
-            INSERT INTO public.claims (loop_id, user_id, streak_count, last_covered_date, covered_count_today)
+            INSERT INTO public.claims_all (loop_id, user_id, streak_count, last_covered_date, covered_count_today)
             VALUES (v_matched_loop_id, p_user_id, 1, CURRENT_DATE, 1);
             v_status := 'claimed';
         END IF;
@@ -195,7 +211,7 @@ BEGIN
         VALUES (p_default_name, v_new_geom, v_new_centroid, p_user_id)
         RETURNING id, name, geom INTO v_matched_loop_id, v_matched_loop_name, v_matched_loop_geom;
         
-        INSERT INTO public.claims (loop_id, user_id, streak_count, last_covered_date, covered_count_today)
+        INSERT INTO public.claims_all (loop_id, user_id, streak_count, last_covered_date, covered_count_today)
         VALUES (v_matched_loop_id, p_user_id, 1, CURRENT_DATE, 1);
         v_status := 'new_loop';
     END IF;
@@ -211,5 +227,46 @@ BEGIN
     ) INTO v_result;
 
     RETURN v_result;
+END;
+$$;
+
+
+-- RPC Function to link anonymous data to upgraded user account
+CREATE OR REPLACE FUNCTION public.link_anonymous_data(p_old_user_id UUID)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_new_user_id UUID := auth.uid();
+BEGIN
+    IF v_new_user_id IS NULL OR p_old_user_id = v_new_user_id THEN
+        RETURN;
+    END IF;
+
+    -- Delete conflicting claims (if new user already claimed this loop)
+    DELETE FROM public.claims_all c_old
+    WHERE c_old.user_id = p_old_user_id
+      AND EXISTS (
+          SELECT 1 
+          FROM public.claims_all c_new 
+          WHERE c_new.loop_id = c_old.loop_id 
+            AND c_new.user_id = v_new_user_id
+      );
+
+    -- Transfer claims
+    UPDATE public.claims_all
+    SET user_id = v_new_user_id
+    WHERE user_id = p_old_user_id;
+
+    -- Transfer walk sessions
+    UPDATE public.walk_sessions
+    SET user_id = v_new_user_id
+    WHERE user_id = p_old_user_id;
+
+    -- Transfer loops
+    UPDATE public.loops
+    SET created_by = v_new_user_id
+    WHERE created_by = p_old_user_id;
 END;
 $$;

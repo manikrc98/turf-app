@@ -7,6 +7,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:uuid/uuid.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../models/session_status.dart';
 import '../models/turf_loop.dart';
@@ -339,12 +340,38 @@ class LocationTrackingProvider extends ChangeNotifier {
       await _claimedLoopRepo.addOrUpdateClaimedLoop(newClaim);
     }
 
+    // Sync name change to Supabase if online
+    try {
+      final client = Supabase.instance.client;
+      if (client.auth.currentSession != null) {
+        await client.from('loops').update({'name': name}).eq('id', loopId);
+      }
+    } catch (e) {
+      print("Failed to sync loop rename to Supabase: $e");
+    }
+
     await _loadClaimedLoops();
   }
 
   /// Abandon a claimed loop
   Future<void> abandonClaim(String loopId) async {
     await _claimedLoopRepo.deleteClaim(loopId);
+
+    // Sync claim deletion to Supabase if online
+    try {
+      final client = Supabase.instance.client;
+      if (client.auth.currentSession != null) {
+        await client.from('claims').delete().eq('loop_id', loopId);
+      }
+    } catch (e) {
+      print("Failed to delete claim from Supabase: $e");
+    }
+
+    await _loadClaimedLoops();
+  }
+
+  /// Public method to manually trigger a reload of claimed loops from cache
+  Future<void> loadClaimedLoops() async {
     await _loadClaimedLoops();
   }
 
