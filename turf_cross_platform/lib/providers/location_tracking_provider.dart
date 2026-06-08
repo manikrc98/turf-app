@@ -14,6 +14,7 @@ import '../models/turf_loop.dart';
 import '../models/claimed_loop.dart';
 import '../models/walk_session_summary.dart';
 import '../models/local_walk_session.dart';
+import '../models/local_claimed_loop.dart';
 import '../repositories/claimed_loop_repository.dart';
 import '../repositories/history_repository.dart';
 import '../repositories/isar_service.dart';
@@ -56,10 +57,23 @@ class LocationTrackingProvider extends ChangeNotifier {
   StreamSubscription? _loopCoveredSub;
   StreamSubscription? _gpsStatusSub;
   StreamSubscription? _spoofSub;
+  StreamSubscription? _isarClaimsSubscription;
 
   LocationTrackingProvider({required this.metricsProvider}) {
     _loadClaimedLoops();
     _checkActiveSessionRecovery();
+    _listenToIsarClaims();
+  }
+
+  Future<void> _listenToIsarClaims() async {
+    try {
+      final isar = await IsarService.getDB();
+      _isarClaimsSubscription = isar.localClaimedLoops.watchLazy().listen((_) {
+        _loadClaimedLoops();
+      });
+    } catch (e) {
+      print("Failed to start Isar claims watcher: $e");
+    }
   }
 
   Future<void> _loadClaimedLoops() async {
@@ -122,12 +136,12 @@ class LocationTrackingProvider extends ChangeNotifier {
 
       final int stepsVal = data['steps'] ?? 0;
       final bool est = data['isStepEstimated'] ?? false;
-      final double dist = data['distanceKm'] ?? 0.0;
+      final double dist = (data['distanceKm'] as num?)?.toDouble() ?? 0.0;
       final int loopsVal = data['loopCount'] ?? 0;
       final int dur = data['durationSeconds'] ?? 0;
       final int cad = data['cadence'] ?? 0;
-      final double elev = data['elevationGainMetres'] ?? 0.0;
-      final double b = data['bearing'] ?? 0.0;
+      final double elev = (data['elevationGainMetres'] as num?)?.toDouble() ?? 0.0;
+      final double b = (data['bearing'] as num?)?.toDouble() ?? 0.0;
       final bool weak = data['gpsSignalWeak'] ?? false;
 
       metricsProvider.updateSteps(stepsVal, dist, est);
@@ -224,10 +238,22 @@ class LocationTrackingProvider extends ChangeNotifier {
 
     // Start background tracking service
     final service = FlutterBackgroundService();
-    await service.startService();
+    final isAlreadyRunning = await service.isRunning();
 
-    _connectToBackgroundService();
-    notifyListeners();
+    if (isAlreadyRunning) {
+      service.invoke('start', {'sessionId': 'active_session'});
+      _connectToBackgroundService();
+      notifyListeners();
+    } else {
+      StreamSubscription? readySubscription;
+      readySubscription = service.on('service_ready').listen((_) {
+        service.invoke('start', {'sessionId': 'active_session'});
+        readySubscription?.cancel();
+      });
+      await service.startService();
+      _connectToBackgroundService();
+      notifyListeners();
+    }
   }
 
   /// Pause current walk session
@@ -252,34 +278,30 @@ class LocationTrackingProvider extends ChangeNotifier {
   Future<WalkSessionSummary?> endWalk() async {
     if (metricsProvider.sessionStatus == SessionStatus.idle) return null;
 
-    final isar = await IsarService.getDB();
-    final activeWalk = await isar.localWalkSessions.get(99999);
+    final summary = WalkSessionSummary(
+      id: const Uuid().v4(),
+      dateTime: _formatCurrentDateTime(),
+      steps: metricsProvider.steps,
+      isStepEstimated: metricsProvider.isStepEstimated,
+      distanceKm: metricsProvider.distanceKm,
+      loopCount: metricsProvider.loopCount,
+      durationSeconds: metricsProvider.durationSeconds,
+      loops: List<TurfLoop>.from(_capturedLoops),
+      cadence: metricsProvider.cadence,
+      elevationGainMetres: metricsProvider.elevationGainMetres,
+    );
 
-    WalkSessionSummary? summary;
-    if (activeWalk != null) {
-      List<TurfLoop> sessionLoops = [];
-      if (activeWalk.loopsJson.isNotEmpty) {
-        try {
-          final List<dynamic> decoded = jsonDecode(activeWalk.loopsJson);
-          sessionLoops = decoded.map((l) => TurfLoop.fromJson(l as Map<String, dynamic>)).toList();
-        } catch (_) {}
-      }
+    // Save walk summary to local repository
+    await _historyRepo.addSession(summary);
 
-      summary = WalkSessionSummary(
-        id: const Uuid().v4(),
-        dateTime: _formatCurrentDateTime(),
-        steps: activeWalk.steps,
-        isStepEstimated: activeWalk.isStepEstimated,
-        distanceKm: activeWalk.distanceKm,
-        loopCount: activeWalk.loopCount,
-        durationSeconds: activeWalk.durationSeconds,
-        loops: sessionLoops,
-        cadence: activeWalk.cadence,
-        elevationGainMetres: activeWalk.elevationGainMetres,
-      );
-
-      // Save walk summary to local repository
-      await _historyRepo.addSession(summary);
+    // Clean up active session record from Isar
+    try {
+      final isar = await IsarService.getDB();
+      await isar.writeTxn(() async {
+        await isar.localWalkSessions.delete(99999);
+      });
+    } catch (e) {
+      print("Failed to delete active session record: $e");
     }
 
     // Stop background service
@@ -408,6 +430,7 @@ class LocationTrackingProvider extends ChangeNotifier {
 
   @override
   void dispose() {
+    _isarClaimsSubscription?.cancel();
     _serviceSubscription?.cancel();
     _loopCapturedSub?.cancel();
     _loopCoveredSub?.cancel();

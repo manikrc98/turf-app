@@ -74,11 +74,11 @@ void main() {
       final List<LatLng> trail = [];
       // User walks 50m to loop (approx 10 points of tail)
       for (int i = 0; i < 10; i++) {
-        trail.add(LatLng(37.7749 + (i * 0.0001), -122.4194));
+        trail.add(LatLng(37.7749 + (i * 0.0002), -122.4194));
       }
       
-      // Loop starts at index 9: LatLng(37.7758, -122.4194)
-      const loopStartLat = 37.7758;
+      // Loop starts at index 9: LatLng(37.7767, -122.4194)
+      const loopStartLat = 37.7767;
       const loopStartLon = -122.4194;
       
       // Add 21 points for the loop going away

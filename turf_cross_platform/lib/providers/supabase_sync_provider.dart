@@ -123,6 +123,8 @@ class SupabaseSyncProvider extends ChangeNotifier {
           .from('claims')
           .select('*, loops(*), profiles(username)');
 
+
+
       final List<ClaimedLoop> globalClaimsList = [];
 
       for (var row in claimsData) {
@@ -131,11 +133,11 @@ class SupabaseSyncProvider extends ChangeNotifier {
         
         if (loopData == null) continue;
 
-        // Parse points from PostGIS Polygon string e.g. "POLYGON((lng1 lat1, lng2 lat2, ...))"
-        final String? geomWkt = loopData['geom'] as String?;
-        if (geomWkt == null) continue;
+        // Parse points from PostGIS Polygon (can be returned as WKT String or GeoJSON Map)
+        final dynamic geomData = loopData['geom'];
+        if (geomData == null) continue;
 
-        final List<LatLng> points = parseWktPolygon(geomWkt);
+        final List<LatLng> points = parseGeometry(geomData);
         if (points.isEmpty) continue;
 
         final String loopId = row['loop_id'] as String;
@@ -247,6 +249,37 @@ class SupabaseSyncProvider extends ChangeNotifier {
   static String toWktLineString(List<LatLng> points) {
     if (points.isEmpty) return '';
     return 'LINESTRING(${points.map((p) => '${p.longitude} ${p.latitude}').join(', ')})';
+  }
+
+  /// Parses a geometry object (WKT String or GeoJSON Map) into List<LatLng>
+  static List<LatLng> parseGeometry(dynamic geom) {
+    if (geom == null) return [];
+    if (geom is String) {
+      return parseWktPolygon(geom);
+    }
+    if (geom is Map) {
+      try {
+        final type = geom['type'] as String?;
+        if (type == 'Polygon') {
+          final coords = geom['coordinates'] as List<dynamic>?;
+          if (coords != null && coords.isNotEmpty) {
+            final ring = coords[0] as List<dynamic>;
+            final List<LatLng> points = [];
+            for (var pt in ring) {
+              if (pt is List<dynamic> && pt.length >= 2) {
+                final double lng = (pt[0] as num).toDouble();
+                final double lat = (pt[1] as num).toDouble();
+                points.add(LatLng(lat, lng));
+              }
+            }
+            return points;
+          }
+        }
+      } catch (e) {
+        print("Failed parsing GeoJSON polygon: $e");
+      }
+    }
+    return [];
   }
 
   /// Parses a WKT POLYGON string into List<LatLng>

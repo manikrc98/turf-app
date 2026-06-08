@@ -31,6 +31,7 @@ class _MapScreenState extends State<MapScreen> {
   final Completer<GoogleMapController> _mapController = Completer<GoogleMapController>();
   bool _permissionsGranted = false;
   bool _permissionDeniedPermanently = false;
+  bool _permissionsChecked = false;
 
   // Custom marker descriptors cached to prevent re-renders
   BitmapDescriptor? _userIcon;
@@ -75,6 +76,7 @@ class _MapScreenState extends State<MapScreen> {
       setState(() {
         _permissionsGranted = true;
         _permissionDeniedPermanently = false;
+        _permissionsChecked = true;
       });
       _initAssets();
       _setupEventsListener();
@@ -84,10 +86,12 @@ class _MapScreenState extends State<MapScreen> {
       setState(() {
         _permissionsGranted = false;
         _permissionDeniedPermanently = true;
+        _permissionsChecked = true;
       });
     } else {
       setState(() {
         _permissionsGranted = false;
+        _permissionsChecked = true;
       });
     }
   }
@@ -113,7 +117,10 @@ class _MapScreenState extends State<MapScreen> {
 
     // Listen for streak updates on claimed loops and sync to Supabase
     _claimedLoopCoveredSubscription = provider.claimedLoopCoveredEvents.listen((claim) async {
-      ScaffoldMessenger.of(context).showSnackBar(
+      final scaffoldMessenger = ScaffoldMessenger.of(context);
+      final syncProvider = Provider.of<SupabaseSyncProvider>(context, listen: false);
+
+      scaffoldMessenger.showSnackBar(
         SnackBar(
           content: Text(
             "Claimed Loop '${claim.name}' covered! 🔥 Streak: ${claim.streakCount} days (Covered ${claim.coveredCountToday} times today)",
@@ -124,7 +131,6 @@ class _MapScreenState extends State<MapScreen> {
         ),
       );
 
-      final syncProvider = Provider.of<SupabaseSyncProvider>(context, listen: false);
       if (syncProvider.currentUserId != null) {
         await syncProvider.attemptClaimLoop(claim.points, claim.name);
         await provider.loadClaimedLoops();
@@ -204,6 +210,15 @@ class _MapScreenState extends State<MapScreen> {
 
   @override
   Widget build(BuildContext context) {
+    if (!_permissionsChecked) {
+      return const Scaffold(
+        backgroundColor: Color(0xFF0F172A),
+        body: Center(
+          child: CircularProgressIndicator(color: Color(0xFF2196F3)),
+        ),
+      );
+    }
+
     if (!_permissionsGranted) {
       return _buildPermissionDeniedUI();
     }
@@ -852,6 +867,7 @@ class _MapScreenState extends State<MapScreen> {
                         children: [
                           _buildMetricWidget("Steps", "${metricsProvider.steps}${metricsProvider.isStepEstimated ? ' (est)' : ''}"),
                           _buildMetricWidget("Distance", "${metricsProvider.distanceKm.toStringAsFixed(2)} km"),
+                          _buildMetricWidget("Time", durationStr),
                           _buildMetricWidget("Loops", "${metricsProvider.loopCount}"),
                         ],
                       ),
@@ -863,7 +879,6 @@ class _MapScreenState extends State<MapScreen> {
                         Row(
                           mainAxisAlignment: MainAxisAlignment.spaceAround,
                           children: [
-                            _buildMetricWidget("Time", durationStr),
                             _buildMetricWidget("Cadence", "${metricsProvider.cadence} SPM"),
                             _buildMetricWidget("Elevation", "${metricsProvider.elevationGainMetres.toStringAsFixed(1)} m"),
                           ],
@@ -969,13 +984,13 @@ class _MapScreenState extends State<MapScreen> {
                                     SummaryBottomSheet.show(
                                       context: context,
                                       mapSnapshot: snapshotBytes,
-                                      steps: metricsProvider.steps,
-                                      isStepEstimated: metricsProvider.isStepEstimated,
-                                      distanceKm: metricsProvider.distanceKm,
-                                      loops: metricsProvider.loopCount,
+                                      steps: summary.steps,
+                                      isStepEstimated: summary.isStepEstimated,
+                                      distanceKm: summary.distanceKm,
+                                      loops: summary.loopCount,
                                       durationSeconds: summary.durationSeconds,
-                                      cadence: metricsProvider.cadence,
-                                      elevationGainMetres: metricsProvider.elevationGainMetres,
+                                      cadence: summary.cadence,
+                                      elevationGainMetres: summary.elevationGainMetres,
                                       onDone: () => setState(() {}),
                                     );
                                   }
@@ -1118,6 +1133,8 @@ class _MapScreenState extends State<MapScreen> {
             onPressed: () async {
               final name = textController.text.trim();
               if (name.isNotEmpty) {
+                // Capture the ScaffoldMessenger and providers using the dialog context BEFORE popping it
+                final scaffoldMessenger = ScaffoldMessenger.of(context);
                 final syncProvider = Provider.of<SupabaseSyncProvider>(context, listen: false);
                 final trackingProvider = Provider.of<LocationTrackingProvider>(context, listen: false);
 
@@ -1127,12 +1144,12 @@ class _MapScreenState extends State<MapScreen> {
                   // Online sync claim
                   final res = await syncProvider.attemptClaimLoop(loop.points, name);
                   if (res != null) {
-                    ScaffoldMessenger.of(context).showSnackBar(
+                    scaffoldMessenger.showSnackBar(
                       SnackBar(content: Text("Loop claimed on backend: $name")),
                     );
                     await trackingProvider.loadClaimedLoops();
                   } else {
-                    ScaffoldMessenger.of(context).showSnackBar(
+                    scaffoldMessenger.showSnackBar(
                       const SnackBar(content: Text("Failed to claim loop on backend. Saved locally.")),
                     );
                     await trackingProvider.nameLoop(loop.id, name);
@@ -1140,7 +1157,7 @@ class _MapScreenState extends State<MapScreen> {
                 } else {
                   // Offline guest claim
                   await trackingProvider.nameLoop(loop.id, name);
-                  ScaffoldMessenger.of(context).showSnackBar(
+                  scaffoldMessenger.showSnackBar(
                     SnackBar(content: Text("Loop claimed locally as: $name")),
                   );
                 }

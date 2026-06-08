@@ -215,7 +215,7 @@ void onStart(ServiceInstance service) async {
     }
 
     // GPS Step & Distance Fallback
-    if (stepBaseline == -1 && !isStepEstimated) {
+    if (stepBaseline == -1) {
       // Step sensor not available yet or fallback active
       if (lastPositionForDistance != null) {
         final double distanceDelta = Geolocator.distanceBetween(
@@ -361,37 +361,49 @@ void onStart(ServiceInstance service) async {
   }
 
   void startTracking() {
+    stopSubscriptions();
     isTracking = true;
     startTimeMillis = DateTime.now().millisecondsSinceEpoch;
 
     // 1. Geolocator stream
-    const locationSettings = LocationSettings(
-      accuracy: LocationAccuracy.high,
-      distanceFilter: 5,
-    );
-    locationSubscription =
-        Geolocator.getPositionStream(locationSettings: locationSettings).listen(
-      (Position position) {
-        if (!isTracking || spoofFlagged) return;
-        processPosition(position);
-      },
-    );
+    try {
+      const locationSettings = LocationSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 5,
+      );
+      locationSubscription =
+          Geolocator.getPositionStream(locationSettings: locationSettings).listen(
+        (Position position) {
+          if (!isTracking || spoofFlagged) return;
+          processPosition(position);
+        },
+        onError: (err) {
+          print("Background Geolocator stream error: $err");
+        },
+      );
+    } catch (e) {
+      print("Failed to start Geolocator position stream: $e");
+    }
 
     // 2. Step Counter stream
-    stepSubscription = Pedometer.stepCountStream.listen(
-      (StepCount event) {
-        if (!isTracking || spoofFlagged) return;
-        if (stepBaseline == -1) {
-          stepBaseline = event.steps;
-          isStepEstimated = false;
-        }
-        steps = event.steps - stepBaseline;
-        distanceKm = StepCounterManager.calculateDistanceKm(steps);
-      },
-      onError: (err) {
-        print("Pedometer Sensor error: $err");
-      },
-    );
+    try {
+      stepSubscription = Pedometer.stepCountStream.listen(
+        (StepCount event) {
+          if (!isTracking || spoofFlagged) return;
+          if (stepBaseline == -1) {
+            stepBaseline = event.steps;
+            isStepEstimated = false;
+          }
+          steps = event.steps - stepBaseline;
+          distanceKm = StepCounterManager.calculateDistanceKm(steps);
+        },
+        onError: (err) {
+          print("Pedometer Sensor error: $err");
+        },
+      );
+    } catch (e) {
+      print("Failed to start Pedometer stream: $e");
+    }
 
     // 3. Periodic timer for stopwatch & cadence
     timer = Timer.periodic(const Duration(seconds: 1), (t) {
@@ -404,7 +416,10 @@ void onStart(ServiceInstance service) async {
         cadence = ((steps.toDouble() / totalElapsed.toDouble()) * 60.0).toInt();
       }
 
-      saveToIsar();
+      // Throttle DB write to every 10 seconds of elapsed duration to prevent blocking the event loop
+      if (totalElapsed % 10 == 0) {
+        saveToIsar();
+      }
 
       service.invoke('update', {
         'steps': steps,
@@ -414,8 +429,8 @@ void onStart(ServiceInstance service) async {
         'durationSeconds': totalElapsed,
         'cadence': cadence,
         'elevationGainMetres': elevationGainMetres,
-        'trailPoints': trailPoints.map((p) => {'lat': p.latitude, 'lng': p.longitude}).toList(),
-        'capturedLoops': capturedLoops.map((l) => l.toJson()).toList(),
+        // Do NOT send trailPoints and capturedLoops every second to save CPU/serialization time.
+        // They are already broadcasted inside processPosition whenever the location changes.
         'gpsSignalWeak': false,
         'bearing': 0.0,
       });
@@ -455,6 +470,35 @@ void onStart(ServiceInstance service) async {
 
     service.stopSelf();
   });
+
+  service.on('start').listen((event) {
+    sessionId = event?['sessionId'] ?? "active_session";
+    steps = 0;
+    isStepEstimated = false;
+    distanceKm = 0.0;
+    loopCount = 0;
+    durationSeconds = 0;
+    cadence = 0;
+    elevationGainMetres = 0.0;
+    accumulatedTimeSeconds = 0;
+    trailPoints = [];
+    capturedLoops = [];
+    isTracking = true;
+    startTimeMillis = DateTime.now().millisecondsSinceEpoch;
+    
+    lastPositionForDistance = null;
+    totalGpsDistanceMetres = 0.0;
+    lastAltitude = null;
+    speedViolationCount = 0;
+    spoofFlagged = false;
+    stepBaseline = -1;
+
+    startTracking();
+    updateNotification('Tracking your walk...');
+  });
+
+  // Notify UI that service is initialized and listening
+  service.invoke('service_ready');
 
   // Start tracking automatically on launch
   startTracking();

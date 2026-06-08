@@ -41,6 +41,7 @@ class SummaryBottomSheet extends StatelessWidget {
       context: context,
       isDismissible: false,
       enableDrag: false,
+      isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (context) => SummaryBottomSheet(
         mapSnapshot: mapSnapshot,
@@ -67,125 +68,130 @@ class SummaryBottomSheet extends StatelessWidget {
     final theme = Theme.of(context);
 
     return Container(
-      padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
       decoration: const BoxDecoration(
         color: Color(0xFF1E293B), // Premium Slate Dark
         borderRadius: BorderRadius.vertical(top: Radius.circular(24.0)),
       ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Center(
-            child: Text(
-              "Walk Summary 🏁",
-              style: theme.textTheme.titleLarge?.copyWith(
-                color: Colors.white,
-                fontWeight: FontWeight.bold,
+      child: SafeArea(
+        top: false,
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Center(
+                child: Text(
+                  "Walk Summary 🏁",
+                  style: theme.textTheme.titleLarge?.copyWith(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
               ),
-            ),
-          ),
-          const SizedBox(height: 16),
-          // Map Snapshot Container
-          Container(
-            height: 200,
-            decoration: BoxDecoration(
-              color: const Color(0xFF334155), // Slate Medium
-              borderRadius: BorderRadius.circular(16),
-            ),
-            clipBehavior: Clip.antiAlias,
-            child: mapSnapshot != null
-                ? Image.memory(
-                    mapSnapshot!,
-                    fit: BoxFit.cover,
-                    width: double.infinity,
-                    height: 200,
-                  )
-                : const Center(
-                    child: Text(
-                      "Snapshot unavailable",
-                      style: TextStyle(color: Colors.white38, fontSize: 14),
+              const SizedBox(height: 16),
+              // Map Snapshot Container
+              Container(
+                height: 200,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF334155), // Slate Medium
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: mapSnapshot != null
+                    ? Image.memory(
+                        mapSnapshot!,
+                        fit: BoxFit.cover,
+                        width: double.infinity,
+                        height: 200,
+                      )
+                    : const Center(
+                        child: Text(
+                          "Snapshot unavailable",
+                          style: TextStyle(color: Colors.white38, fontSize: 14),
+                        ),
+                      ),
+              ),
+              const SizedBox(height: 20),
+              // Summary Grid
+              GridView.count(
+                crossAxisCount: 2,
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                childAspectRatio: 2.2,
+                mainAxisSpacing: 16,
+                crossAxisSpacing: 16,
+                children: [
+                  _buildMetricCard(
+                    Icons.directions_walk_rounded,
+                    "Steps",
+                    "$steps${isStepEstimated ? ' (est)' : ''}",
+                    const Color(0xFF2196F3),
+                  ),
+                  _buildMetricCard(
+                    Icons.map_rounded,
+                    "Distance",
+                    "${distanceKm.toStringAsFixed(2)} km",
+                    const Color(0xFF4CAF50),
+                  ),
+                  _buildMetricCard(
+                    Icons.restore_rounded,
+                    "Duration",
+                    _formatDuration(durationSeconds),
+                    const Color(0xFFFF9800),
+                  ),
+                  _buildMetricCard(
+                    Icons.donut_large_rounded,
+                    "Loops Captured",
+                    "$loops",
+                    const Color(0xFFE91E63),
+                  ),
+                  _buildMetricCard(
+                    Icons.speed_rounded,
+                    "Avg Cadence",
+                    "$cadence SPM",
+                    const Color(0xFF9C27B0),
+                  ),
+                  _buildMetricCard(
+                    Icons.filter_hdr_rounded,
+                    "Elevation Gain",
+                    "${elevationGainMetres.toStringAsFixed(1)} m",
+                    const Color(0xFF00BCD4),
+                  ),
+                ],
+              ),
+              if (loops == 0) ...[
+                const SizedBox(height: 16),
+                const Center(
+                  child: Text(
+                    "Try completing a loop next time!",
+                    style: TextStyle(
+                      color: Color(0xFFFF9800),
+                      fontSize: 14,
+                      fontStyle: FontStyle.italic,
                     ),
                   ),
-          ),
-          const SizedBox(height: 20),
-          // Summary Grid
-          GridView.count(
-            crossAxisCount: 2,
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            childAspectRatio: 2.2,
-            mainAxisSpacing: 16,
-            crossAxisSpacing: 16,
-            children: [
-              _buildMetricCard(
-                Icons.directions_walk_rounded,
-                "Steps",
-                "$steps${isStepEstimated ? ' (est)' : ''}",
-                const Color(0xFF2196F3),
-              ),
-              _buildMetricCard(
-                Icons.map_rounded,
-                "Distance",
-                "${distanceKm.toStringAsFixed(2)} km",
-                const Color(0xFF4CAF50),
-              ),
-              _buildMetricCard(
-                Icons.restore_rounded,
-                "Duration",
-                _formatDuration(durationSeconds),
-                const Color(0xFFFF9800),
-              ),
-              _buildMetricCard(
-                Icons.donut_large_rounded,
-                "Loops Captured",
-                "$loops",
-                const Color(0xFFE91E63),
-              ),
-              _buildMetricCard(
-                Icons.speed_rounded,
-                "Avg Cadence",
-                "$cadence SPM",
-                const Color(0xFF9C27B0),
-              ),
-              _buildMetricCard(
-                Icons.filter_hdr_rounded,
-                "Elevation Gain",
-                "${elevationGainMetres.toStringAsFixed(1)} m",
-                const Color(0xFF00BCD4),
+                ),
+              ],
+              const SizedBox(height: 24),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF2196F3),
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+                onPressed: () {
+                  Navigator.pop(context);
+                  onDone();
+                },
+                child: const Text(
+                  "Awesome, Done",
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white),
+                ),
               ),
             ],
           ),
-          if (loops == 0) ...[
-            const SizedBox(height: 16),
-            const Center(
-              child: Text(
-                "Try completing a loop next time!",
-                style: TextStyle(
-                  color: Color(0xFFFF9800),
-                  fontSize: 14,
-                  fontStyle: FontStyle.italic,
-                ),
-              ),
-            ),
-          ],
-          const SizedBox(height: 24),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF2196F3),
-              padding: const EdgeInsets.symmetric(vertical: 16),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-            ),
-            onPressed: () {
-              Navigator.pop(context);
-              onDone();
-            },
-            child: const Text(
-              "Awesome, Done",
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white),
-            ),
-          ),
-        ],
+        ),
       ),
     );
   }
