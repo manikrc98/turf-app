@@ -93,7 +93,6 @@ class ClaimedLoopRepository {
       final List<ClaimedLoop> list = localList.map((l) => _toClaimedLoop(l)).toList();
 
       final today = getTodayDateString();
-      final yesterday = getYesterdayDateString();
       bool changed = false;
       final List<ClaimedLoop> prunedList = [];
       final List<LocalClaimedLoop> localUpdates = [];
@@ -103,22 +102,14 @@ class ClaimedLoopRepository {
         final loop = list[i];
         final localItem = localList[i];
         
-        if (loop.lastCoveredDate == today) {
-          prunedList.add(loop);
-        } else if (loop.lastCoveredDate == yesterday) {
-          if (loop.coveredCountToday > 0) {
-            // Reset daily count for the new day
-            final updated = loop.copyWith(coveredCountToday: 0);
-            prunedList.add(updated);
-            localUpdates.add(_toLocal(updated)..id = localItem.id);
-            changed = true;
-          } else {
-            prunedList.add(loop);
-          }
-        } else {
-          // Streak lost - claim expired! Remove from Isar database
-          localDeletes.add(localItem.id);
+        if (loop.lastCoveredDate != today && loop.coveredCountToday > 0) {
+          // Reset daily count for the new day
+          final updated = loop.copyWith(coveredCountToday: 0);
+          prunedList.add(updated);
+          localUpdates.add(_toLocal(updated)..id = localItem.id);
           changed = true;
+        } else {
+          prunedList.add(loop);
         }
       }
 

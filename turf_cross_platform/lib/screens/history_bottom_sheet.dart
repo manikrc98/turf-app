@@ -41,8 +41,9 @@ class _HistoryBottomSheetState extends State<HistoryBottomSheet> {
     final confirm = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text("Clear Walk History"),
-        content: const Text("Are you sure you want to permanently delete all your walk session records?"),
+        backgroundColor: const Color(0xFF1E293B),
+        title: const Text("Clear Walk History", style: TextStyle(color: Colors.white)),
+        content: const Text("Are you sure you want to permanently delete all your walk session records?", style: TextStyle(color: Colors.white70)),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -59,6 +60,33 @@ class _HistoryBottomSheetState extends State<HistoryBottomSheet> {
 
     if (confirm == true) {
       await _historyRepo.clearHistory();
+      _loadHistory();
+    }
+  }
+
+  Future<void> _deleteSession(WalkSessionSummary session) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF1E293B),
+        title: const Text("Delete Walk Record", style: TextStyle(color: Colors.white)),
+        content: Text("Are you sure you want to delete this walk record from '${session.dateTime}'?", style: const TextStyle(color: Colors.white70)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text("Cancel"),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text("Delete"),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm == true) {
+      await _historyRepo.deleteSession(session.id);
       _loadHistory();
     }
   }
@@ -171,6 +199,16 @@ class _HistoryBottomSheetState extends State<HistoryBottomSheet> {
       child: ExpansionTile(
         iconColor: Colors.white70,
         collapsedIconColor: Colors.white54,
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            IconButton(
+              icon: const Icon(Icons.delete_outline_rounded, color: Colors.redAccent, size: 22),
+              onPressed: () => _deleteSession(session),
+            ),
+            const Icon(Icons.expand_more_rounded, color: Colors.white54),
+          ],
+        ),
         title: Text(
           session.dateTime,
           style: const TextStyle(

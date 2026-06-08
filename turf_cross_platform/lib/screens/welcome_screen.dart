@@ -41,8 +41,6 @@ class _WelcomeScreenState extends State<WelcomeScreen> with SingleTickerProvider
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final size = MediaQuery.of(context).size;
     final syncProvider = Provider.of<SupabaseSyncProvider>(context);
 
     return Scaffold(

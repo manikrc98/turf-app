@@ -7,6 +7,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:provider/provider.dart';
 
+import '../location/loop_detector.dart';
 import '../providers/tracking_metrics_provider.dart';
 import '../providers/location_tracking_provider.dart';
 import '../providers/supabase_sync_provider.dart';
@@ -51,6 +52,7 @@ class _MapScreenState extends State<MapScreen> {
 
   // Real-time location and heading variables
   LatLng? _currentLocation;
+  LatLng? _lastSyncCameraCenter;
   double _currentHeading = 0.0;
   bool _shouldFollowCamera = true;
   bool _isProgrammaticMovement = false;
@@ -272,9 +274,37 @@ class _MapScreenState extends State<MapScreen> {
             onCameraMove: (CameraPosition position) {
               _currentZoom = position.zoom;
             },
-            onCameraIdle: () {
-              // Trigger repaint when camera movement stops to apply zoom visibility filters
-              setState(() {});
+            onCameraIdle: () async {
+              if (mounted) {
+                setState(() {});
+              }
+
+              try {
+                final controller = await _mapController.future;
+                final LatLngBounds bounds = await controller.getVisibleRegion();
+                final LatLng cameraCenter = LatLng(
+                  (bounds.northeast.latitude + bounds.southwest.latitude) / 2,
+                  (bounds.northeast.longitude + bounds.southwest.longitude) / 2,
+                );
+
+                // Only sync if camera moved > 1000m from the last synced camera center
+                if (_lastSyncCameraCenter == null ||
+                    LoopDetector.calculateDistanceMetres(
+                          _lastSyncCameraCenter!.latitude,
+                          _lastSyncCameraCenter!.longitude,
+                          cameraCenter.latitude,
+                          cameraCenter.longitude,
+                        ) >
+                        1000.0) {
+                  _lastSyncCameraCenter = cameraCenter;
+                  if (mounted) {
+                    final syncProvider = Provider.of<SupabaseSyncProvider>(context, listen: false);
+                    await syncProvider.pullClaims(center: cameraCenter);
+                  }
+                }
+              } catch (e) {
+                print("Failed to sync on camera idle: $e");
+              }
             },
           ),
 
@@ -577,7 +607,7 @@ class _MapScreenState extends State<MapScreen> {
 
   String _getCacheStateKey(LocationTrackingProvider provider) {
     final claimedPart = provider.cachedClaimedLoops
-        .map((c) => "${c.id}_${c.streakCount}_${c.coveredCountToday}")
+        .map((c) => "${c.id}_${c.streakCount}_${c.coveredCountToday}_${c.isActive}")
         .join(",");
     final capturedPart = provider.capturedLoops
         .map((l) => "${l.id}_${l.name ?? ''}")
@@ -592,7 +622,7 @@ class _MapScreenState extends State<MapScreen> {
 
     // Pre-cache claimed loops in provider.cachedClaimedLoops
     for (var claim in provider.cachedClaimedLoops) {
-      final cacheKey = "${claim.id}_${claim.streakCount}_${claim.coveredCountToday}";
+      final cacheKey = "${claim.id}_${claim.streakCount}_${claim.coveredCountToday}_${claim.isActive}";
       if (!_cardMarkerCache.containsKey(cacheKey)) {
         try {
           final descriptor = await MarkerGenerator.createCardMarker(
@@ -600,6 +630,8 @@ class _MapScreenState extends State<MapScreen> {
             claim.streakCount,
             claim.coveredCountToday,
             pixelRatio,
+            claim.isActive,
+            claim.ownerName,
           );
           _cardMarkerCache[cacheKey] = descriptor;
           cacheUpdated = true;
@@ -657,7 +689,7 @@ class _MapScreenState extends State<MapScreen> {
         final claim = provider.cachedClaimedLoops[claimedIndex];
         final center = _getMarkerNorthOffset(loop.points);
         
-        final cacheKey = "${claim.id}_${claim.streakCount}_${claim.coveredCountToday}";
+        final cacheKey = "${claim.id}_${claim.streakCount}_${claim.coveredCountToday}_${claim.isActive}";
         final cachedIcon = _cardMarkerCache[cacheKey];
         
         final icon = zoomInEnough
@@ -704,7 +736,7 @@ class _MapScreenState extends State<MapScreen> {
 
       final center = _getMarkerNorthOffset(claim.points);
       
-      final cacheKey = "${claim.id}_${claim.streakCount}_${claim.coveredCountToday}";
+      final cacheKey = "${claim.id}_${claim.streakCount}_${claim.coveredCountToday}_${claim.isActive}";
       final cachedIcon = _cardMarkerCache[cacheKey];
       
       final icon = zoomInEnough
@@ -1176,12 +1208,28 @@ class _MapScreenState extends State<MapScreen> {
       context: context,
       builder: (context) => AlertDialog(
         backgroundColor: const Color(0xFF1E293B),
-        title: Text(claim.isMyClaim ? "Claimed Loop: ${claim.name} 🏆" : "Claimed Loop: ${claim.name}", style: const TextStyle(color: Colors.white)),
+        title: Text(
+          !claim.isActive
+              ? "Expired Claim: ${claim.name} ⏳"
+              : (claim.isMyClaim ? "Claimed Loop: ${claim.name} 🏆" : "Claimed Loop: ${claim.name}"),
+          style: const TextStyle(color: Colors.white),
+        ),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (claim.isMyClaim) ...[
+            if (!claim.isActive) ...[
+              const Text("This loop is currently unclaimed! ⏳", style: TextStyle(color: Colors.amberAccent, fontSize: 16, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              if (claim.ownerName.isNotEmpty && claim.streakCount > 0)
+                Text("Last Owner: ${claim.ownerName} (Streak: ${claim.streakCount} days)", style: const TextStyle(color: Colors.white70)),
+              const SizedBox(height: 8),
+              const Text("Walk this path and close the loop to claim ownership and start a new streak!", style: TextStyle(color: Colors.white70, fontSize: 13.5)),
+            ] else if (claim.ownerId.isEmpty) ...[
+              const Text("This loop is currently unclaimed! 🟢", style: TextStyle(color: Colors.greenAccent, fontSize: 16, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              const Text("Walk this path and close the loop to claim ownership and start your daily streak!", style: TextStyle(color: Colors.white70, fontSize: 13.5)),
+            ] else if (claim.isMyClaim) ...[
               Text("🔥 Streak: ${claim.streakCount} days", style: const TextStyle(color: Colors.white70)),
               Text("🔄 Covered today: ${claim.coveredCountToday} times", style: const TextStyle(color: Colors.white70)),
               Text("📅 Last covered: ${claim.lastCoveredDate}", style: const TextStyle(color: Colors.white70)),
@@ -1197,6 +1245,10 @@ class _MapScreenState extends State<MapScreen> {
               )
             ] else ...[
               Text("Claimed by: ${claim.ownerName.isEmpty ? 'Enemy Player' : claim.ownerName} 👤", style: const TextStyle(color: Colors.white70, fontSize: 16, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              Text("🔥 Streak: ${claim.streakCount} days", style: const TextStyle(color: Colors.white70)),
+              const SizedBox(height: 4),
+              Text("📅 Last covered: ${claim.lastCoveredDate}", style: const TextStyle(color: Colors.white70)),
               const SizedBox(height: 8),
               const Text("This is competitive territory! Recover this loop to claim it.", style: TextStyle(color: Colors.white38, fontSize: 12)),
             ]
@@ -1235,7 +1287,7 @@ class _MapScreenState extends State<MapScreen> {
             onPressed: () => Navigator.pop(context),
             child: const Text("Close"),
           ),
-          if (claim.isMyClaim)
+          if (claim.isMyClaim && claim.isActive)
             ElevatedButton(
               onPressed: () {
                 final newName = textController.text.trim();

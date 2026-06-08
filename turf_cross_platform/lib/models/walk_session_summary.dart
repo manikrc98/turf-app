@@ -12,6 +12,7 @@ class WalkSessionSummary {
   final List<TurfLoop> loops;
   final int cadence;
   final double elevationGainMetres;
+  final List<LatLng> trailPoints;
 
   WalkSessionSummary({
     required this.id,
@@ -24,6 +25,7 @@ class WalkSessionSummary {
     this.loops = const [],
     this.cadence = 0,
     this.elevationGainMetres = 0.0,
+    this.trailPoints = const [],
   });
 
   /// Create from JSON Map
@@ -46,6 +48,14 @@ class WalkSessionSummary {
       }
     }
 
+    var trailJson = json['trailPoints'] as List?;
+    List<LatLng> trailPts = [];
+    if (trailJson != null) {
+      trailPts = trailJson.map((pt) {
+        return LatLng(pt['lat'] as double, pt['lng'] as double);
+      }).toList();
+    }
+
     return WalkSessionSummary(
       id: json['id'] as String,
       dateTime: json['dateTime'] as String,
@@ -57,6 +67,7 @@ class WalkSessionSummary {
       loops: sessionLoops,
       cadence: json['cadence'] as int? ?? 0,
       elevationGainMetres: (json['elevationGainMetres'] as num? ?? 0.0).toDouble(),
+      trailPoints: trailPts,
     );
   }
 
@@ -73,6 +84,7 @@ class WalkSessionSummary {
       'loops': loops.map((l) => l.toJson()).toList(),
       'cadence': cadence,
       'elevationGainMetres': elevationGainMetres,
+      'trailPoints': trailPoints.map((pt) => {'lat': pt.latitude, 'lng': pt.longitude}).toList(),
     };
   }
 }

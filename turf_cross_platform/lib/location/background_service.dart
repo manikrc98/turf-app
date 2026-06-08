@@ -255,38 +255,70 @@ void onStart(ServiceInstance service) async {
       ClaimedLoop? matchingClaim;
       const double thresholdMetres = 25.0 * 0.3048; // 25 feet
 
+      // 1. Calculate centroid of completed loopPoints
+      double sumLat = 0.0;
+      double sumLng = 0.0;
+      for (var p in loopPoints) {
+        sumLat += p.latitude;
+        sumLng += p.longitude;
+      }
+      final double loopCentroidLat = sumLat / loopPoints.length;
+      final double loopCentroidLng = sumLng / loopPoints.length;
+
+      // 2. Coarse filter local claims using centroid distance check (e.g. 100 meters)
+      final List<ClaimedLoop> candidateClaims = [];
       for (var localClaim in localClaims) {
-        List<LatLng> pts = [];
+        if (localClaim.latList.isEmpty) continue;
+        
+        // Calculate centroid of localClaim
+        double clSumLat = 0.0;
+        double clSumLng = 0.0;
         for (int i = 0; i < localClaim.latList.length; i++) {
-          pts.add(LatLng(localClaim.latList[i], localClaim.lngList[i]));
+          clSumLat += localClaim.latList[i];
+          clSumLng += localClaim.lngList[i];
         }
+        final double clCentroidLat = clSumLat / localClaim.latList.length;
+        final double clCentroidLng = clSumLng / localClaim.latList.length;
 
-        bool isClose = false;
-        for (var newPt in loopPoints) {
-          for (var claimedPt in pts) {
-            final double dist = LoopDetector.calculateDistanceMetres(
-              newPt.latitude, newPt.longitude,
-              claimedPt.latitude, claimedPt.longitude,
-            );
-            if (dist <= thresholdMetres) {
-              isClose = true;
-              break;
-            }
+        final double distanceToCentroid = LoopDetector.calculateDistanceMetres(
+          loopCentroidLat, loopCentroidLng,
+          clCentroidLat, clCentroidLng,
+        );
+
+        if (distanceToCentroid <= 100.0) {
+          final List<LatLng> pts = [];
+          for (int i = 0; i < localClaim.latList.length; i++) {
+            pts.add(LatLng(localClaim.latList[i], localClaim.lngList[i]));
           }
-          if (isClose) break;
-        }
-
-        if (isClose) {
-          matchingClaim = ClaimedLoop(
+          candidateClaims.add(ClaimedLoop(
             id: localClaim.loopId,
             name: localClaim.name,
             points: pts,
             streakCount: localClaim.streakCount,
             lastCoveredDate: localClaim.lastCoveredDate,
             coveredCountToday: localClaim.coveredCountToday,
-          );
-          break;
+          ));
         }
+      }
+
+      // 3. Perform precision point-by-point matching only on the nearby candidates
+      for (var candidate in candidateClaims) {
+        bool isClose = false;
+        for (var newPt in loopPoints) {
+          for (var claimedPt in candidate.points) {
+            final double dist = LoopDetector.calculateDistanceMetres(
+              newPt.latitude, newPt.longitude,
+              claimedPt.latitude, claimedPt.longitude,
+            );
+            if (dist <= thresholdMetres) {
+              isClose = true;
+              matchingClaim = candidate;
+              break;
+            }
+          }
+          if (isClose) break;
+        }
+        if (isClose) break;
       }
 
       if (matchingClaim != null) {
@@ -337,9 +369,8 @@ void onStart(ServiceInstance service) async {
       }
 
       trailPoints = [newLatLng]; // Reset trail starting from current closing point
+      await saveToIsar(); // Persist immediately when a loop is completed
     }
-
-    await saveToIsar();
     
     // Invoke update event to UI
     service.invoke('update', {
@@ -499,8 +530,4 @@ void onStart(ServiceInstance service) async {
 
   // Notify UI that service is initialized and listening
   service.invoke('service_ready');
-
-  // Start tracking automatically on launch
-  startTracking();
-  updateNotification('Tracking your walk...');
 }

@@ -21,6 +21,14 @@ class LoopDetector {
 
     for (int i = 0; i <= searchLimit; i++) {
       final historicalPoint = trailPoints[i];
+
+      // Fast Cartesian box filtering (0.00015 degrees ~= 16.7m latitude, 0.0002 degrees ~= 15-22m longitude)
+      final double latDiff = (historicalPoint.latitude - newPoint.latitude).abs();
+      if (latDiff > 0.00015) continue;
+
+      final double lonDiff = (historicalPoint.longitude - newPoint.longitude).abs();
+      if (lonDiff > 0.0002) continue;
+
       final distance = calculateDistanceMetres(
         historicalPoint.latitude, historicalPoint.longitude,
         newPoint.latitude, newPoint.longitude

@@ -289,6 +289,7 @@ class LocationTrackingProvider extends ChangeNotifier {
       loops: List<TurfLoop>.from(_capturedLoops),
       cadence: metricsProvider.cadence,
       elevationGainMetres: metricsProvider.elevationGainMetres,
+      trailPoints: List<LatLng>.from(_trailPoints),
     );
 
     // Save walk summary to local repository

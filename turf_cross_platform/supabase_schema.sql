@@ -11,8 +11,11 @@ CREATE TABLE IF NOT EXISTS public.profiles (
 
 -- Enable RLS for Profiles
 ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Allow public read on profiles" ON public.profiles;
 CREATE POLICY "Allow public read on profiles" ON public.profiles FOR SELECT USING (true);
+DROP POLICY IF EXISTS "Allow users to update own profile" ON public.profiles;
 CREATE POLICY "Allow users to update own profile" ON public.profiles FOR UPDATE USING (auth.uid() = id);
+DROP POLICY IF EXISTS "Allow users to insert own profile" ON public.profiles;
 CREATE POLICY "Allow users to insert own profile" ON public.profiles FOR INSERT WITH CHECK (auth.uid() = id);
 
 -- 2. Global Loops Table (Stores the geometric polygon path of all loops)
@@ -31,8 +34,11 @@ CREATE INDEX IF NOT EXISTS loops_centroid_idx ON public.loops USING GIST (centro
 
 -- Enable RLS for Loops
 ALTER TABLE public.loops ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Allow public read on loops" ON public.loops;
 CREATE POLICY "Allow public read on loops" ON public.loops FOR SELECT USING (true);
+DROP POLICY IF EXISTS "Allow users to create loops" ON public.loops;
 CREATE POLICY "Allow users to create loops" ON public.loops FOR INSERT WITH CHECK (auth.uid() = created_by);
+DROP POLICY IF EXISTS "Allow users to update own loops" ON public.loops;
 CREATE POLICY "Allow users to update own loops" ON public.loops FOR UPDATE USING (auth.uid() = created_by);
 
 -- 3. Competitive Loop Claims Table (Single Owner Competitive Claiming)
@@ -49,6 +55,7 @@ CREATE INDEX IF NOT EXISTS claims_user_idx ON public.claims_all (user_id);
 
 -- Enable RLS for Claims
 ALTER TABLE public.claims_all ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Allow users to delete own claims" ON public.claims_all;
 CREATE POLICY "Allow users to delete own claims" ON public.claims_all FOR DELETE USING (auth.uid() = user_id);
 
 -- Expose public claims view that conditionally exposes private statistics
@@ -57,9 +64,9 @@ SELECT
     loop_id,
     user_id,
     claimed_at,
-    CASE WHEN (auth.uid() = user_id) THEN streak_count ELSE NULL END AS streak_count,
-    CASE WHEN (auth.uid() = user_id) THEN last_covered_date ELSE NULL END AS last_covered_date,
-    CASE WHEN (auth.uid() = user_id) THEN covered_count_today ELSE NULL END AS covered_count_today
+    streak_count,
+    last_covered_date,
+    covered_count_today
 FROM public.claims_all;
 
 -- Grant permissions on the view and base table
@@ -84,7 +91,9 @@ CREATE INDEX IF NOT EXISTS walk_sessions_geom_idx ON public.walk_sessions USING 
 
 -- Enable RLS for Walk Sessions
 ALTER TABLE public.walk_sessions ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Allow users to view own walk sessions" ON public.walk_sessions;
 CREATE POLICY "Allow users to view own walk sessions" ON public.walk_sessions FOR SELECT USING (auth.uid() = user_id);
+DROP POLICY IF EXISTS "Allow users to insert own walk sessions" ON public.walk_sessions;
 CREATE POLICY "Allow users to insert own walk sessions" ON public.walk_sessions FOR INSERT WITH CHECK (auth.uid() = user_id);
 
 
@@ -102,11 +111,14 @@ AS $$
 DECLARE
     v_new_geom GEOMETRY;
     v_new_centroid GEOMETRY;
+    v_new_geom_3857 GEOMETRY;
+    v_new_geom_buffered_3857 GEOMETRY;
     v_matched_loop_id UUID := NULL;
     v_matched_loop_name TEXT;
     v_matched_loop_geom GEOMETRY;
     
     r_candidate RECORD;
+    r_geom_3857 GEOMETRY;
     v_iou DOUBLE PRECISION;
     v_intersection_area DOUBLE PRECISION;
     v_union_area DOUBLE PRECISION;
@@ -124,19 +136,24 @@ BEGIN
     BEGIN
         v_new_geom := ST_GeomFromText(p_trail_coords, 4326);
         v_new_centroid := ST_Centroid(v_new_geom);
+        
+        -- Project to Web Mercator (EPSG:3857) and buffer by 10.0m once to optimize calculations
+        v_new_geom_3857 := ST_Transform(v_new_geom, 3857);
+        v_new_geom_buffered_3857 := ST_Buffer(v_new_geom_3857, 10.0);
     EXCEPTION WHEN OTHERS THEN
         RETURN jsonb_build_object('success', false, 'error', 'Invalid coordinates WKT format');
     END;
 
-    -- 2. Find candidate loops within 30-meters centroid distance (Fast indexing lookup)
+    -- 2. Find candidate loops within 30-meters centroid distance (Fast indexed sargable lookup: 0.0003 deg ~= 33m)
     FOR r_candidate IN 
         SELECT id, name, geom 
         FROM public.loops 
-        WHERE ST_DWithin(centroid::geography, v_new_centroid::geography, 30.0)
+        WHERE ST_DWithin(centroid, v_new_centroid, 0.0003)
     LOOP
-        -- Calculate Area-buffered IoU (10m buffer to smooth minor GPS variations)
-        v_intersection_area := ST_Area(ST_Intersection(ST_Buffer(v_new_geom::geography, 10.0), ST_Buffer(r_candidate.geom::geography, 10.0)));
-        v_union_area := ST_Area(ST_Union(ST_Buffer(v_new_geom::geography, 10.0), ST_Buffer(r_candidate.geom::geography, 10.0)));
+        -- Calculate Area-buffered IoU using flat Cartesian math in 3857
+        r_geom_3857 := ST_Transform(r_candidate.geom, 3857);
+        v_intersection_area := ST_Area(ST_Intersection(v_new_geom_buffered_3857, ST_Buffer(r_geom_3857, 10.0)));
+        v_union_area := ST_Area(ST_Union(v_new_geom_buffered_3857, ST_Buffer(r_geom_3857, 10.0)));
         
         IF v_union_area > 0 THEN
             v_iou := v_intersection_area / v_union_area;
@@ -270,3 +287,40 @@ BEGIN
     WHERE created_by = p_old_user_id;
 END;
 $$;
+
+
+-- RPC Function to fetch loops in radius, returning a JSONB representation matching direct select structure
+CREATE OR REPLACE FUNCTION public.get_loops_in_radius(
+    p_lat DOUBLE PRECISION,
+    p_lng DOUBLE PRECISION,
+    p_radius_meters DOUBLE PRECISION
+)
+RETURNS TABLE (
+    data JSONB
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT jsonb_build_object(
+        'loop_id', l.id,
+        'user_id', c.user_id,
+        'claimed_at', c.claimed_at,
+        'streak_count', c.streak_count,
+        'last_covered_date', c.last_covered_date,
+        'covered_count_today', c.covered_count_today,
+        'loops', jsonb_build_object(
+            'id', l.id,
+            'name', l.name,
+            'geom', ST_AsText(l.geom)
+        ),
+        'profiles', CASE WHEN p.username IS NOT NULL THEN jsonb_build_object('username', p.username) ELSE NULL END
+    )
+    FROM public.loops l
+    LEFT JOIN public.claims_all c ON l.id = c.loop_id AND c.last_covered_date >= (CURRENT_DATE - INTERVAL '1 day')::DATE
+    LEFT JOIN public.profiles p ON c.user_id = p.id
+    WHERE ST_DWithin(l.centroid, ST_SetSRID(ST_Point(p_lng, p_lat), 4326), p_radius_meters / 111000.0);
+END;
+$$;
+

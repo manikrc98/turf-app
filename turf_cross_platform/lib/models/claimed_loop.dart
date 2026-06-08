@@ -25,8 +25,31 @@ class ClaimedLoop {
     this.isMyClaim = true,
   });
 
+  bool get isActive {
+    if (lastCoveredDate.isEmpty) return false;
+    final now = DateTime.now();
+    final todayStr = _formatDate(now);
+    final yesterdayStr = _formatDate(now.subtract(const Duration(days: 1)));
+    return lastCoveredDate == todayStr || lastCoveredDate == yesterdayStr;
+  }
+
+  static String _formatDate(DateTime date) {
+    final y = date.year.toString().padLeft(4, '0');
+    final m = date.month.toString().padLeft(2, '0');
+    final d = date.day.toString().padLeft(2, '0');
+    return '$y-$m-$d';
+  }
+
   /// Get the dynamic color for this claimed loop
   Color getDynamicColor() {
+    if (ownerId.isEmpty) {
+      // Unclaimed loop color: Premium soft slate grey
+      return const Color(0xFF94A3B8);
+    }
+    if (!isActive) {
+      // Expired loop color: Slate grey
+      return const Color(0xFF94A3B8);
+    }
     if (!isMyClaim) {
       // Enemy territory color: Sleek competitive purple/magenta
       return const Color(0xFF9C27B0);

@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:isar/isar.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -21,6 +22,12 @@ class HistoryRepository {
         print("Failed to decode loopsJson from Isar session: $e");
       }
     }
+
+    final List<LatLng> trail = [];
+    for (int i = 0; i < local.trailLatList.length; i++) {
+      trail.add(LatLng(local.trailLatList[i], local.trailLngList[i]));
+    }
+
     return WalkSessionSummary(
       id: local.sessionId,
       dateTime: local.dateTime,
@@ -32,6 +39,7 @@ class HistoryRepository {
       loops: sessionLoops,
       cadence: local.cadence,
       elevationGainMetres: local.elevationGainMetres,
+      trailPoints: trail,
     );
   }
 
@@ -47,8 +55,8 @@ class HistoryRepository {
       ..durationSeconds = summary.durationSeconds
       ..cadence = summary.cadence
       ..elevationGainMetres = summary.elevationGainMetres
-      ..trailLatList = const []
-      ..trailLngList = const []
+      ..trailLatList = summary.trailPoints.map((p) => p.latitude).toList()
+      ..trailLngList = summary.trailPoints.map((p) => p.longitude).toList()
       ..loopsJson = jsonEncode(summary.loops.map((l) => l.toJson()).toList())
       ..isSynced = false;
     return local;
@@ -121,6 +129,21 @@ class HistoryRepository {
       });
     } catch (e) {
       print("Error clearing walk history in Isar: $e");
+    }
+  }
+
+  /// Delete a single walk session from history
+  Future<void> deleteSession(String sessionId) async {
+    try {
+      final isar = await IsarService.getDB();
+      final existing = await isar.localWalkSessions.filter().sessionIdEqualTo(sessionId).findFirst();
+      if (existing != null) {
+        await isar.writeTxn(() async {
+          await isar.localWalkSessions.delete(existing.id);
+        });
+      }
+    } catch (e) {
+      print("Error deleting walk session in Isar: $e");
     }
   }
 }

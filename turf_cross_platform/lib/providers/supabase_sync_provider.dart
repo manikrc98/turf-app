@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:google_sign_in/google_sign_in.dart';
@@ -54,7 +55,7 @@ class SupabaseSyncProvider extends ChangeNotifier {
         client = Supabase.instance.client;
       } catch (e) {
         print("Supabase is not initialized. Operating in offline-first local mode. $e");
-        _initialized = false;
+        _initialized = true;
         _isSyncing = false;
         notifyListeners();
         return;
@@ -104,13 +105,14 @@ class SupabaseSyncProvider extends ChangeNotifier {
       await syncUnsyncedWalkSessions();
     } catch (e) {
       print("Supabase Initialize & Auth error: $e");
+      _initialized = true;
       _isSyncing = false;
       notifyListeners();
     }
   }
 
-  /// Pull all claims globally and save them to local Isar DB
-  Future<void> pullClaims() async {
+  /// Pull all claims globally or within a radius of the specified center and save them to local Isar DB
+  Future<void> pullClaims({LatLng? center}) async {
     if (_currentUserId == null) return;
 
     try {
@@ -118,18 +120,46 @@ class SupabaseSyncProvider extends ChangeNotifier {
       notifyListeners();
 
       final client = Supabase.instance.client;
-      // Fetch claims joined with profiles (owner details) and loops (geometries)
-      final List<dynamic> claimsData = await client
-          .from('claims')
-          .select('*, loops(*), profiles(username)');
+      List<dynamic> claimsData = [];
 
+      LatLng? syncCenter = center;
+      if (syncCenter == null) {
+        try {
+          final pos = await Geolocator.getLastKnownPosition();
+          if (pos != null) {
+            syncCenter = LatLng(pos.latitude, pos.longitude);
+          }
+        } catch (e) {
+          print("Could not get last known position for sync: $e");
+        }
+      }
 
+      if (syncCenter != null) {
+        // Fetch loops within 10km (10000m) radius using optimized PostGIS RPC
+        final res = await client.rpc('get_loops_in_radius', params: {
+          'p_lat': syncCenter.latitude,
+          'p_lng': syncCenter.longitude,
+          'p_radius_meters': 10000.0,
+        });
+        if (res != null) {
+          claimsData = res as List<dynamic>;
+        }
+      } else {
+        // Fallback global fetch if no location context is available
+        claimsData = await client
+            .from('claims')
+            .select('*, loops(*), profiles(username)');
+      }
 
       final List<ClaimedLoop> globalClaimsList = [];
 
       for (var row in claimsData) {
-        final loopData = row['loops'];
-        final profileData = row['profiles'];
+        final Map<String, dynamic> claimRow = (row is Map && row.containsKey('data'))
+            ? row['data'] as Map<String, dynamic>
+            : row as Map<String, dynamic>;
+
+        final loopData = claimRow['loops'];
+        final profileData = claimRow['profiles'];
         
         if (loopData == null) continue;
 
@@ -140,14 +170,14 @@ class SupabaseSyncProvider extends ChangeNotifier {
         final List<LatLng> points = parseGeometry(geomData);
         if (points.isEmpty) continue;
 
-        final String loopId = row['loop_id'] as String;
+        final String loopId = claimRow['loop_id'] as String;
         final String name = loopData['name'] as String;
-        final int streak = (row['streak_count'] as int?) ?? 0;
-        final String lastCovered = (row['last_covered_date'] as String?) ?? '';
-        final int coveredToday = (row['covered_count_today'] as int?) ?? 0;
+        final int streak = (claimRow['streak_count'] as int?) ?? 0;
+        final String lastCovered = (claimRow['last_covered_date'] as String?) ?? '';
+        final int coveredToday = (claimRow['covered_count_today'] as int?) ?? 0;
         
-        final String ownerId = row['user_id'] as String;
-        final String ownerName = (profileData != null) ? profileData['username'] as String : "Player";
+        final String ownerId = (claimRow['user_id'] as String?) ?? "";
+        final String ownerName = (profileData != null) ? profileData['username'] as String : "Unclaimed";
         final bool isMyClaim = ownerId == _currentUserId;
 
         globalClaimsList.add(
@@ -192,8 +222,19 @@ class SupabaseSyncProvider extends ChangeNotifier {
       });
 
       if (res != null && res['success'] == true) {
-        // Pull latest updates to refresh the map and cache
-        await pullClaims();
+        LatLng? centroid;
+        if (points.isNotEmpty) {
+          double sumLat = 0;
+          double sumLng = 0;
+          for (var pt in points) {
+            sumLat += pt.latitude;
+            sumLng += pt.longitude;
+          }
+          centroid = LatLng(sumLat / points.length, sumLng / points.length);
+        }
+
+        // Pull latest updates to refresh the map and cache around the claimed loop
+        await pullClaims(center: centroid);
         return res as Map<String, dynamic>;
       }
       return null;

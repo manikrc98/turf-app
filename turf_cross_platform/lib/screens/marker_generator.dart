@@ -93,6 +93,8 @@ class MarkerGenerator {
     int streak,
     int coveredCount,
     double pixelRatio,
+    bool isActive,
+    String ownerName,
   ) async {
     final double scale = pixelRatio;
     final double paddingX = 14.0 * scale;
@@ -101,16 +103,35 @@ class MarkerGenerator {
     final double cornerRadius = 6.0 * scale;
     final double shadowPadding = 3.0 * scale;
 
-    final String daysWord = streak == 1 ? "day" : "days";
-    final String loopsWord = coveredCount == 1 ? "loop" : "loops";
-    final String line1 = "$streak $daysWord of $name";
-    final String line2 = "$coveredCount $loopsWord done today";
+    final String line1;
+    final String line2;
+    final Color titleColor;
+
+    if (!isActive) {
+      line1 = "Unclaimed: $name";
+      if (ownerName.isNotEmpty && streak > 0) {
+        line2 = "Last Owner: $ownerName (${streak}d)";
+      } else {
+        line2 = "Walk this path to claim";
+      }
+      titleColor = const Color(0xFF64748B); // Slate Gray for inactive/unclaimed
+    } else if (streak == 0) {
+      line1 = "Unclaimed: $name";
+      line2 = "Walk this path to claim";
+      titleColor = const Color(0xFF64748B); // Slate Gray for unclaimed
+    } else {
+      final String daysWord = streak == 1 ? "day" : "days";
+      final String loopsWord = coveredCount == 1 ? "loop" : "loops";
+      line1 = "$streak $daysWord of $name";
+      line2 = "$coveredCount $loopsWord done today";
+      titleColor = const Color(0xFF0D47A1); // Deep Blue for active claim
+    }
 
     final tp1 = TextPainter(textDirection: TextDirection.ltr);
     tp1.text = TextSpan(
       text: line1,
       style: TextStyle(
-        color: const Color(0xFF0D47A1), // Deep Blue
+        color: titleColor,
         fontSize: 13.0 * scale,
         fontWeight: FontWeight.bold,
       ),
