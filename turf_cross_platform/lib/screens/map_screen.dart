@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle, HapticFeedback;
@@ -30,7 +31,37 @@ class MapScreen extends StatefulWidget {
   State<MapScreen> createState() => _MapScreenState();
 }
 
+class GlowPathCache {
+  final List<LatLng> closedPoints;
+  final List<double> cumulativeDistances;
+  final double totalLength;
+  final double minLat;
+  final double maxLat;
+  final double minLng;
+  final double maxLng;
+
+  GlowPathCache({
+    required this.closedPoints,
+    required this.cumulativeDistances,
+    required this.totalLength,
+    required this.minLat,
+    required this.maxLat,
+    required this.minLng,
+    required this.maxLng,
+  });
+}
+
 class _MapScreenState extends State<MapScreen> {
+  Timer? _glowTimer;
+  final ValueNotifier<double> _glowPhaseNotifier = ValueNotifier<double>(0.0);
+  double _glowPhase = 0.0;
+  final Map<String, GlowPathCache> _glowPathCache = {};
+
+  LatLngBounds? _visibleBounds;
+  Set<Polygon> _cachedPolygons = {};
+  Set<Marker> _cachedMarkers = {};
+  Set<Polyline> _cachedStaticPolylines = {};
+
   final Completer<GoogleMapController> _mapController = Completer<GoogleMapController>();
   bool _permissionsGranted = false;
   bool _permissionDeniedPermanently = false;
@@ -67,6 +98,12 @@ class _MapScreenState extends State<MapScreen> {
   @override
   void initState() {
     super.initState();
+    _glowTimer = Timer.periodic(const Duration(milliseconds: 50), (timer) {
+      if (mounted) {
+        _glowPhase = (_glowPhase + 0.01) % 1.0;
+        _glowPhaseNotifier.value = _glowPhase;
+      }
+    });
     _checkPermissionsAndInit();
   }
 
@@ -214,6 +251,8 @@ class _MapScreenState extends State<MapScreen> {
 
   @override
   void dispose() {
+    _glowTimer?.cancel();
+    _glowPhaseNotifier.dispose();
     _loopCapturedSubscription?.cancel();
     _claimedLoopCoveredSubscription?.cancel();
     _realtimeLocationSubscription?.cancel();
@@ -237,6 +276,9 @@ class _MapScreenState extends State<MapScreen> {
     }
 
     final trackingProvider = Provider.of<LocationTrackingProvider>(context);
+
+    // Update static map elements (polygons, markers, static polylines) on parent build
+    _updateStaticMapObjects(trackingProvider);
 
     // Pre-cache custom map markers
     final cacheKey = _getCacheStateKey(trackingProvider);
@@ -278,71 +320,93 @@ class _MapScreenState extends State<MapScreen> {
                           ),
                         )
                       else
-                        GoogleMap(
-                          style: _mapStyleString,
-                          initialCameraPosition: const CameraPosition(
-                            target: LatLng(0.0, 0.0),
-                            zoom: 17.0,
-                          ),
-                          myLocationButtonEnabled: false,
-                          myLocationEnabled: false,
-                          compassEnabled: false, // Turn off native compass for HUD feel
-                          zoomControlsEnabled: false,
-                          mapType: MapType.normal,
-                          polylines: _buildPolylines(trackingProvider),
-                          polygons: _buildPolygons(trackingProvider),
-                          markers: _buildMarkersSync(trackingProvider),
-                          onMapCreated: (GoogleMapController controller) async {
-                            _mapController.complete(controller);
-                            // Hide native map load pops (e.g. style initialization flash)
-                            await Future.delayed(const Duration(milliseconds: 1000));
-                            if (mounted) {
-                              setState(() {
-                                _mapReady = true;
-                              });
-                            }
-                          },
-                        onCameraMoveStarted: () {
-                          if (!_isProgrammaticMovement) {
-                            _shouldFollowCamera = false;
-                          }
-                          _isProgrammaticMovement = false;
-                        },
-                        onCameraMove: (CameraPosition position) {
-                          _currentZoom = position.zoom;
-                        },
-                        onCameraIdle: () async {
-                          if (mounted) {
-                            setState(() {});
-                          }
+                        ValueListenableBuilder<double>(
+                          valueListenable: _glowPhaseNotifier,
+                          builder: (context, phase, child) {
+                            return GoogleMap(
+                              style: _mapStyleString,
+                              initialCameraPosition: const CameraPosition(
+                                target: LatLng(0.0, 0.0),
+                                zoom: 17.0,
+                              ),
+                              myLocationButtonEnabled: false,
+                              myLocationEnabled: false,
+                              compassEnabled: false, // Turn off native compass for HUD feel
+                              zoomControlsEnabled: false,
+                              mapType: MapType.normal,
+                              polylines: Set<Polyline>.of(_cachedStaticPolylines)
+                                ..addAll(_buildGlowPolylines(trackingProvider, phase)),
+                              polygons: _cachedPolygons,
+                              markers: _cachedMarkers,
+                              onMapCreated: (GoogleMapController controller) async {
+                                _mapController.complete(controller);
+                                // Hide native map load pops (e.g. style initialization flash)
+                                await Future.delayed(const Duration(milliseconds: 1000));
+                                if (mounted) {
+                                  LatLngBounds? bounds;
+                                  try {
+                                    bounds = await controller.getVisibleRegion();
+                                  } catch (e) {
+                                    print("Failed to get visible bounds onMapCreated: $e");
+                                  }
+                                  setState(() {
+                                    _mapReady = true;
+                                    _visibleBounds = bounds;
+                                  });
+                                }
+                              },
+                              onCameraMoveStarted: () {
+                                if (!_isProgrammaticMovement) {
+                                  _shouldFollowCamera = false;
+                                }
+                                _isProgrammaticMovement = false;
+                              },
+                              onCameraMove: (CameraPosition position) {
+                                _currentZoom = position.zoom;
+                              },
+                              onCameraIdle: () async {
+                                LatLngBounds? bounds;
+                                try {
+                                  final controller = await _mapController.future;
+                                  bounds = await controller.getVisibleRegion();
+                                  _visibleBounds = bounds;
+                                } catch (e) {
+                                  print("Failed to get visible bounds onCameraIdle: $e");
+                                }
 
-                          try {
-                            final controller = await _mapController.future;
-                            final LatLngBounds bounds = await controller.getVisibleRegion();
-                            final LatLng cameraCenter = LatLng(
-                              (bounds.northeast.latitude + bounds.southwest.latitude) / 2,
-                              (bounds.northeast.longitude + bounds.southwest.longitude) / 2,
+                                if (mounted) {
+                                  setState(() {});
+                                }
+
+                                try {
+                                  if (bounds != null) {
+                                    final LatLng cameraCenter = LatLng(
+                                      (bounds.northeast.latitude + bounds.southwest.latitude) / 2,
+                                      (bounds.northeast.longitude + bounds.southwest.longitude) / 2,
+                                    );
+
+                                    if (_lastSyncCameraCenter == null ||
+                                        LoopDetector.calculateDistanceMetres(
+                                              _lastSyncCameraCenter!.latitude,
+                                              _lastSyncCameraCenter!.longitude,
+                                              cameraCenter.latitude,
+                                              cameraCenter.longitude,
+                                            ) >
+                                            1000.0) {
+                                      _lastSyncCameraCenter = cameraCenter;
+                                      if (mounted) {
+                                        final syncProvider = Provider.of<SupabaseSyncProvider>(context, listen: false);
+                                        await syncProvider.pullClaims(center: cameraCenter);
+                                      }
+                                    }
+                                  }
+                                } catch (e) {
+                                  print("Failed to sync on camera idle: $e");
+                                }
+                              },
                             );
-
-                            if (_lastSyncCameraCenter == null ||
-                                LoopDetector.calculateDistanceMetres(
-                                      _lastSyncCameraCenter!.latitude,
-                                      _lastSyncCameraCenter!.longitude,
-                                      cameraCenter.latitude,
-                                      cameraCenter.longitude,
-                                    ) >
-                                    1000.0) {
-                              _lastSyncCameraCenter = cameraCenter;
-                              if (mounted) {
-                                final syncProvider = Provider.of<SupabaseSyncProvider>(context, listen: false);
-                                await syncProvider.pullClaims(center: cameraCenter);
-                              }
-                            }
-                          } catch (e) {
-                            print("Failed to sync on camera idle: $e");
-                          }
-                        },
-                      ),
+                          },
+                        ),
 
                       // Overlay to fade transition the native map load pop
                       if (_mapStyleString != null)
@@ -1065,7 +1129,7 @@ class _MapScreenState extends State<MapScreen> {
           anchor: const Offset(0.5, 0.5),
           rotation: _currentHeading,
           flat: true,
-          zIndex: 10,
+          zIndexInt: 10,
         ),
       );
     }
@@ -1148,7 +1212,13 @@ class _MapScreenState extends State<MapScreen> {
     return markers;
   }
 
-  Set<Polyline> _buildPolylines(LocationTrackingProvider provider) {
+  void _updateStaticMapObjects(LocationTrackingProvider provider) {
+    _cachedPolygons = _buildPolygons(provider);
+    _cachedMarkers = _buildMarkersSync(provider);
+    _cachedStaticPolylines = _buildStaticPolylines(provider);
+  }
+
+  Set<Polyline> _buildStaticPolylines(LocationTrackingProvider provider) {
     final Set<Polyline> polylines = {};
     if (provider.trailPoints.isNotEmpty) {
       polylines.add(
@@ -1207,6 +1277,69 @@ class _MapScreenState extends State<MapScreen> {
             color: const Color(0xFF4A4A4A),
             width: 1,
             patterns: [PatternItem.dash(10), PatternItem.gap(10)],
+          ),
+        );
+      }
+    }
+
+    return polylines;
+  }
+
+  Set<Polyline> _buildGlowPolylines(LocationTrackingProvider provider, double phase) {
+    final Set<Polyline> polylines = {};
+    // Add travelling glow polylines for actively claimed loops
+    for (var claim in provider.cachedClaimedLoops) {
+      if (!claim.isActive || claim.ownerId.isEmpty) continue; // Only animate active claims
+
+      final String cacheKey = claim.id;
+      final GlowPathCache? cache = _glowPathCache[cacheKey];
+      if (cache != null && !_isLoopVisible(cache, _visibleBounds)) {
+        continue;
+      }
+
+      final Color baseColor = claim.isMyClaim 
+          ? const Color(0xFFB8FF00) // Lime green for HELD
+          : const Color(0xFFFF6B00); // Orange for CONTESTED
+
+      final List<LatLng> glowPoints = _extractGlowSegment(claim, phase);
+      if (glowPoints.length >= 2) {
+        // Outer glow
+        polylines.add(
+          Polyline(
+            polylineId: PolylineId("claim_glow_outer_${claim.id}"),
+            points: glowPoints,
+            color: baseColor.withOpacity(0.35),
+            width: 12,
+            jointType: JointType.round,
+            startCap: Cap.roundCap,
+            endCap: Cap.roundCap,
+            zIndex: 3,
+          ),
+        );
+        // Inner glow
+        polylines.add(
+          Polyline(
+            polylineId: PolylineId("claim_glow_inner_${claim.id}"),
+            points: glowPoints,
+            color: baseColor.withOpacity(0.9),
+            width: 6,
+            jointType: JointType.round,
+            startCap: Cap.roundCap,
+            endCap: Cap.roundCap,
+            zIndex: 4,
+          ),
+        );
+        // Core laser highlight
+        polylines.add(
+          Polyline(
+            polylineId: PolylineId("claim_glow_core_${claim.id}"),
+            points: glowPoints,
+            color: Colors.white,
+            width: 2,
+            jointType: JointType.round,
+            startCap: Cap.roundCap,
+            endCap: Cap.roundCap,
+            zIndex: 5,
           ),
         );
       }
@@ -1752,6 +1885,155 @@ class _MapScreenState extends State<MapScreen> {
       southwest: LatLng(minLat, minLng),
       northeast: LatLng(maxLat, maxLng),
     );
+  }
+
+  List<LatLng> _extractGlowSegment(ClaimedLoop claim, double phase) {
+    final String cacheKey = claim.id;
+    GlowPathCache? pathCache = _glowPathCache[cacheKey];
+
+    if (pathCache == null) {
+      final points = claim.points;
+      if (points.isEmpty) return [];
+
+      final closedPoints = List<LatLng>.from(points);
+      if (closedPoints.first != closedPoints.last) {
+        closedPoints.add(closedPoints.first);
+      }
+
+      final int numPoints = closedPoints.length;
+      final List<double> cumulativeDistances = List<double>.filled(numPoints, 0.0);
+      double totalLength = 0.0;
+      cumulativeDistances[0] = 0.0;
+
+      double minLat = closedPoints.first.latitude;
+      double maxLat = closedPoints.first.latitude;
+      double minLng = closedPoints.first.longitude;
+      double maxLng = closedPoints.first.longitude;
+
+      for (int i = 0; i < numPoints; i++) {
+        final pt = closedPoints[i];
+        if (pt.latitude < minLat) minLat = pt.latitude;
+        if (pt.latitude > maxLat) maxLat = pt.latitude;
+        if (pt.longitude < minLng) minLng = pt.longitude;
+        if (pt.longitude > maxLng) maxLng = pt.longitude;
+
+        if (i < numPoints - 1) {
+          final dist = _getDistance(pt, closedPoints[i + 1]);
+          totalLength += dist;
+          cumulativeDistances[i + 1] = totalLength;
+        }
+      }
+
+      pathCache = GlowPathCache(
+        closedPoints: closedPoints,
+        cumulativeDistances: cumulativeDistances,
+        totalLength: totalLength,
+        minLat: minLat,
+        maxLat: maxLat,
+        minLng: minLng,
+        maxLng: maxLng,
+      );
+      _glowPathCache[cacheKey] = pathCache;
+    }
+
+    final double totalLength = pathCache.totalLength;
+    if (totalLength <= 0.0) return [];
+
+    final double glowLength = totalLength * 0.25;
+    final double startDist = phase * totalLength;
+    final double endDist = startDist + glowLength;
+
+    final double s = startDist % totalLength;
+    final double e = endDist % totalLength;
+
+    final List<LatLng> result = [];
+    if (s <= e) {
+      _addPointsForRange(pathCache.closedPoints, pathCache.cumulativeDistances, totalLength, s, e, result);
+    } else {
+      _addPointsForRange(pathCache.closedPoints, pathCache.cumulativeDistances, totalLength, s, totalLength, result);
+      _addPointsForRange(pathCache.closedPoints, pathCache.cumulativeDistances, totalLength, 0.0, e, result);
+    }
+    return result;
+  }
+
+  bool _isLoopVisible(GlowPathCache cache, LatLngBounds? bounds) {
+    if (bounds == null) return true;
+
+    // Check if the loop's bounding box overlaps with the visible bounds (plus ~500m safety padding).
+    const double padding = 0.005;
+    final double minLatLimit = bounds.southwest.latitude - padding;
+    final double maxLatLimit = bounds.northeast.latitude + padding;
+    final double minLngLimit = bounds.southwest.longitude - padding;
+    final double maxLngLimit = bounds.northeast.longitude + padding;
+
+    return (cache.minLat <= maxLatLimit && cache.maxLat >= minLatLimit) &&
+           (cache.minLng <= maxLngLimit && cache.maxLng >= minLngLimit);
+  }
+
+  double _getDistance(LatLng p1, LatLng p2) {
+    const double earthRadius = 6371000.0; // in meters
+    final double dLat = _toRadians(p2.latitude - p1.latitude);
+    final double dLng = _toRadians(p2.longitude - p1.longitude);
+    final double a = math.sin(dLat / 2) * math.sin(dLat / 2) +
+        math.cos(_toRadians(p1.latitude)) * math.cos(_toRadians(p2.latitude)) *
+        math.sin(dLng / 2) * math.sin(dLng / 2);
+    final double c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a));
+    return earthRadius * c;
+  }
+
+  double _toRadians(double degree) {
+    return degree * math.pi / 180.0;
+  }
+
+  LatLng _interpolate(LatLng p1, LatLng p2, double fraction) {
+    final double lat = p1.latitude + (p2.latitude - p1.latitude) * fraction;
+    final double lng = p1.longitude + (p2.longitude - p1.longitude) * fraction;
+    return LatLng(lat, lng);
+  }
+
+  LatLng _getInterpolatedPoint(List<LatLng> points, List<double> cumD, double totalLength, double d) {
+    if (d <= 0.0) return points.first;
+    if (d >= totalLength) return points.last;
+
+    for (int i = 0; i < points.length - 1; i++) {
+      final double d1 = cumD[i];
+      final double d2 = cumD[i + 1];
+      if (d >= d1 && d <= d2) {
+        final double denom = d2 - d1;
+        final double fraction = denom > 0.0 ? (d - d1) / denom : 0.0;
+        return _interpolate(points[i], points[i + 1], fraction);
+      }
+    }
+    return points.last;
+  }
+
+  void _addPointsForRange(
+    List<LatLng> points,
+    List<double> cumD,
+    double totalLength,
+    double startD,
+    double endD,
+    List<LatLng> result,
+  ) {
+    final LatLng startPt = _getInterpolatedPoint(points, cumD, totalLength, startD);
+    if (result.isEmpty || startPt != result.last) {
+      result.add(startPt);
+    }
+
+    for (int i = 0; i < points.length; i++) {
+      final double d = cumD[i];
+      if (d > startD && d < endD) {
+        final LatLng pt = points[i];
+        if (pt != result.last) {
+          result.add(pt);
+        }
+      }
+    }
+
+    final LatLng endPt = _getInterpolatedPoint(points, cumD, totalLength, endD);
+    if (endPt != result.last) {
+      result.add(endPt);
+    }
   }
 }
 
