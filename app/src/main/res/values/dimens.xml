@@ -1,8 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <dimen name="metric_pill_padding">12dp</dimen>
-    <dimen name="metric_pill_corner_radius">16dp</dimen>
-    <dimen name="bottom_sheet_peek_height">160dp</dimen>
-    <dimen name="recenter_fab_margin">16dp</dimen>
-    <dimen name="card_elevation">4dp</dimen>
-</resources>
