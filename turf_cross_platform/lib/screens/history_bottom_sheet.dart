@@ -1,10 +1,16 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show HapticFeedback;
+import 'package:google_fonts/google_fonts.dart';
 import '../models/walk_session_summary.dart';
 import '../repositories/history_repository.dart';
+import '../location/sound_manager.dart'; // Import SoundManager
 
 class HistoryBottomSheet extends StatefulWidget {
-  const HistoryBottomSheet({super.key});
+  final VoidCallback? onStartWalking;
 
+  const HistoryBottomSheet({super.key, this.onStartWalking});
+
+  // Keep static show for backward compatibility/reference if needed, but not used in tabs
   static void show(BuildContext context, VoidCallback onDismiss) {
     showModalBottomSheet(
       context: context,
@@ -38,21 +44,43 @@ class _HistoryBottomSheetState extends State<HistoryBottomSheet> {
   }
 
   Future<void> _clearHistory() async {
+    HapticFeedback.heavyImpact();
+    SoundManager.playDeleteHistory(); // Play delete history sound
     final confirm = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF1E293B),
-        title: const Text("Clear Walk History", style: TextStyle(color: Colors.white)),
-        content: const Text("Are you sure you want to permanently delete all your walk session records?", style: TextStyle(color: Colors.white70)),
+        backgroundColor: const Color(0xFF141414),
+        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.zero),
+        title: Text(
+          "CLEAR WALK HISTORY?",
+          style: GoogleFonts.spaceGrotesk(color: Colors.white, fontWeight: FontWeight.bold),
+        ),
+        content: Text(
+          "ARE YOU SURE YOU WANT TO PERMANENTLY DELETE ALL WALK SESSIONS?",
+          style: GoogleFonts.jetBrainsMono(color: const Color(0xFF888888), fontSize: 11),
+        ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text("Cancel"),
+            onPressed: () {
+              HapticFeedback.heavyImpact();
+              SoundManager.playButtonClick();
+              Navigator.pop(context, false);
+            },
+            child: Text("CANCEL", style: GoogleFonts.spaceGrotesk(color: const Color(0xFF888888))),
           ),
           ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text("Clear All"),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.transparent,
+              foregroundColor: const Color(0xFFFF3B3B),
+              side: const BorderSide(color: Color(0xFFFF3B3B)),
+              shape: const RoundedRectangleBorder(borderRadius: BorderRadius.zero),
+            ),
+            onPressed: () {
+              HapticFeedback.heavyImpact();
+              SoundManager.playDeleteHistory();
+              Navigator.pop(context, true);
+            },
+            child: Text("CLEAR ALL", style: GoogleFonts.spaceGrotesk(fontWeight: FontWeight.bold)),
           ),
         ],
       ),
@@ -65,98 +93,69 @@ class _HistoryBottomSheetState extends State<HistoryBottomSheet> {
   }
 
   Future<void> _deleteSession(WalkSessionSummary session) async {
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF1E293B),
-        title: const Text("Delete Walk Record", style: TextStyle(color: Colors.white)),
-        content: Text("Are you sure you want to delete this walk record from '${session.dateTime}'?", style: const TextStyle(color: Colors.white70)),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text("Cancel"),
-          ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text("Delete"),
-          ),
-        ],
-      ),
-    );
-
-    if (confirm == true) {
-      await _historyRepo.deleteSession(session.id);
-      _loadHistory();
-    }
-  }
-
-  String _formatDuration(int seconds) {
-    final int min = seconds ~/ 60;
-    final int sec = seconds % 60;
-    return '${min.toString().padLeft(2, '0')}:${sec.toString().padLeft(2, '0')}';
+    await _historyRepo.deleteSession(session.id);
+    // Remove from local list without reloading database to prevent disrupting animations
+    setState(() {
+      _history.removeWhere((s) => s.id == session.id);
+    });
   }
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final mediaQuery = MediaQuery.of(context);
-
     return Container(
-      height: mediaQuery.size.height * 0.85,
-      decoration: const BoxDecoration(
-        color: Color(0xFF1E293B), // Premium Slate Dark
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24.0)),
-      ),
+      color: const Color(0xFF0A0A0A), // Styleguide dark bg
+      width: double.infinity,
+      height: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 24.0),
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Drag handle
-          Center(
-            child: Container(
-              margin: const EdgeInsets.symmetric(vertical: 12.0),
-              width: 40.0,
-              height: 4.5,
-              decoration: BoxDecoration(
-                color: Colors.white24,
-                borderRadius: BorderRadius.circular(10.0),
+          // Header Row
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                "// WALK_HISTORY",
+                style: GoogleFonts.jetBrainsMono(
+                  color: const Color(0xFF444444),
+                  fontSize: 11,
+                  fontWeight: FontWeight.w400,
+                  letterSpacing: 11 * 0.06,
+                ),
               ),
-            ),
-          ),
-          // Header
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20.0, vertical: 8.0),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  "Walk History",
-                  style: theme.textTheme.headlineSmall?.copyWith(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
+              if (_history.isNotEmpty)
+                GestureDetector(
+                  onTap: _clearHistory,
+                  child: Text(
+                    "DELETE_ALL",
+                    style: GoogleFonts.jetBrainsMono(
+                      color: const Color(0xFFFF3B3B),
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: 11 * 0.06,
+                    ),
                   ),
                 ),
-                if (_history.isNotEmpty)
-                  IconButton(
-                    icon: const Icon(Icons.delete_sweep, color: Colors.redAccent),
-                    tooltip: "Clear History",
-                    onPressed: _clearHistory,
-                  ),
-              ],
-            ),
+            ],
           ),
-          const Divider(color: Colors.white12, height: 1),
-          // History items list
+          const SizedBox(height: 24),
+          
+          // History Items List
           Expanded(
             child: _isLoading
-                ? const Center(child: CircularProgressIndicator(color: Color(0xFF2196F3)))
+                ? const Center(child: CircularProgressIndicator(color: Color(0xFFB8FF00))) // Lime green #B8FF00
                 : _history.isEmpty
                     ? _buildEmptyState()
                     : ListView.builder(
-                        padding: const EdgeInsets.all(16.0),
+                        padding: EdgeInsets.zero,
                         itemCount: _history.length,
                         itemBuilder: (context, index) {
                           final session = _history[index];
-                          return _buildSessionCard(session);
+                          return HistoryRowWidget(
+                            key: ValueKey(session.id),
+                            session: session,
+                            onDelete: () => _deleteSession(session),
+                          );
                         },
                       ),
           ),
@@ -170,131 +169,239 @@ class _HistoryBottomSheetState extends State<HistoryBottomSheet> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          const Icon(Icons.directions_walk_rounded, size: 72, color: Colors.white30),
-          const SizedBox(height: 16),
           Text(
-            "No walks recorded yet",
-            style: TextStyle(
-              color: Colors.white.withOpacity(0.6),
-              fontSize: 18,
-              fontWeight: FontWeight.w500,
+            "NO WALKS YET",
+            style: GoogleFonts.spaceGrotesk(
+              color: Colors.white,
+              fontSize: 20,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 20 * 0.04,
             ),
           ),
-          const SizedBox(height: 8),
-          const Text(
-            "Start a walk session on the map to track loops!",
-            style: TextStyle(color: Colors.white38, fontSize: 14),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildSessionCard(WalkSessionSummary session) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 14.0),
-      color: const Color(0xFF334155), // Slate Medium
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16.0)),
-      elevation: 3.0,
-      child: ExpansionTile(
-        iconColor: Colors.white70,
-        collapsedIconColor: Colors.white54,
-        trailing: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            IconButton(
-              icon: const Icon(Icons.delete_outline_rounded, color: Colors.redAccent, size: 22),
-              onPressed: () => _deleteSession(session),
+          const SizedBox(height: 12),
+          Text(
+            "GET OUT THERE. WALK A BLOCK. OWN IT.",
+            textAlign: TextAlign.center,
+            style: GoogleFonts.jetBrainsMono(
+              color: const Color(0xFF888888),
+              fontSize: 11,
+              fontWeight: FontWeight.w400,
+              letterSpacing: 11 * 0.06,
             ),
-            const Icon(Icons.expand_more_rounded, color: Colors.white54),
-          ],
-        ),
-        title: Text(
-          session.dateTime,
-          style: const TextStyle(
-            color: Colors.white,
-            fontWeight: FontWeight.bold,
-            fontSize: 16.0,
           ),
-        ),
-        subtitle: Padding(
-          padding: const EdgeInsets.only(top: 6.0),
-          child: Text(
-            "${session.steps} steps · ${session.distanceKm.toStringAsFixed(2)} km · ${session.loopCount} loops",
-            style: const TextStyle(color: Colors.white70, fontSize: 13.5),
-          ),
-        ),
-        childrenPadding: const EdgeInsets.all(16.0),
-        children: [
-          // Expandable detailed grid
-          GridView.count(
-            crossAxisCount: 3,
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            childAspectRatio: 1.6,
-            mainAxisSpacing: 8,
-            crossAxisSpacing: 8,
-            children: [
-              _buildMetricDetail("Steps", "${session.steps}${session.isStepEstimated ? ' (est)' : ''}"),
-              _buildMetricDetail("Distance", "${session.distanceKm.toStringAsFixed(2)} km"),
-              _buildMetricDetail("Duration", _formatDuration(session.durationSeconds)),
-              _buildMetricDetail("Loops Captured", "${session.loopCount}"),
-              _buildMetricDetail("Avg Cadence", "${session.cadence} SPM"),
-              _buildMetricDetail("Elevation Climb", "${session.elevationGainMetres.toStringAsFixed(1)} m"),
-            ],
-          ),
-          if (session.loops.isNotEmpty) ...[
-            const SizedBox(height: 12),
-            const Divider(color: Colors.white24),
-            const SizedBox(height: 4),
-            const Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                "Captured Loops in Session:",
-                style: TextStyle(color: Colors.white70, fontWeight: FontWeight.bold, fontSize: 13.0),
+          const SizedBox(height: 24),
+          GestureDetector(
+            onTap: () {
+              HapticFeedback.heavyImpact();
+              SoundManager.playButtonClick();
+              if (widget.onStartWalking != null) {
+                widget.onStartWalking!();
+              }
+            },
+            child: Text(
+              "START WALKING →",
+              style: GoogleFonts.jetBrainsMono(
+                color: const Color(0xFFB8FF00), // Lime green #B8FF00
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 12 * 0.06,
               ),
             ),
-            const SizedBox(height: 6),
-            Wrap(
-              spacing: 6.0,
-              runSpacing: 4.0,
-              children: session.loops.map((loop) {
-                return Chip(
-                  backgroundColor: const Color(0x204CAF50),
-                  label: Text(
-                    loop.name ?? "Unclaimed Loop",
-                    style: const TextStyle(color: Color(0xFF81C784), fontSize: 12.0),
-                  ),
-                  side: const BorderSide(color: Color(0x404CAF50)),
-                  padding: const EdgeInsets.symmetric(horizontal: 4.0),
-                );
-              }).toList(),
-            ),
-          ]
+          ),
         ],
       ),
     );
   }
+}
 
-  Widget _buildMetricDetail(String label, String value) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        Text(
-          label,
-          style: const TextStyle(color: Colors.white38, fontSize: 11),
-        ),
-        const SizedBox(height: 3),
-        Text(
-          value,
-          style: const TextStyle(
-            color: Colors.white,
-            fontWeight: FontWeight.w600,
-            fontSize: 13.5,
+class HistoryRowWidget extends StatefulWidget {
+  final WalkSessionSummary session;
+  final VoidCallback onDelete;
+
+  const HistoryRowWidget({
+    super.key,
+    required this.session,
+    required this.onDelete,
+  });
+
+  @override
+  State<HistoryRowWidget> createState() => _HistoryRowWidgetState();
+}
+
+class _HistoryRowWidgetState extends State<HistoryRowWidget> with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  late Animation<Offset> _slideAnimation;
+  late Animation<double> _fadeAnimation;
+  late Animation<double> _heightFactorAnimation;
+  bool _isDeleting = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 450),
+    );
+
+    // Slide left (x from 0.0 to -1.1) over 250ms (0.0 to 0.55 interval)
+    _slideAnimation = Tween<Offset>(
+      begin: Offset.zero,
+      end: const Offset(-1.1, 0.0),
+    ).animate(
+      CurvedAnimation(
+        parent: _controller,
+        curve: const Interval(0.0, 0.55, curve: Curves.easeIn),
+      ),
+    );
+
+    // Fade out (opacity from 1.0 to 0.0) over 250ms (0.0 to 0.55 interval)
+    _fadeAnimation = Tween<double>(begin: 1.0, end: 0.0).animate(
+      CurvedAnimation(
+        parent: _controller,
+        curve: const Interval(0.0, 0.55, curve: Curves.easeIn),
+      ),
+    );
+
+    // Height collapse (factor from 1.0 to 0.0) over 200ms (0.55 to 1.0 interval)
+    _heightFactorAnimation = Tween<double>(begin: 1.0, end: 0.0).animate(
+      CurvedAnimation(
+        parent: _controller,
+        curve: const Interval(0.55, 1.0, curve: Curves.linear),
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _startDeleteAnimation() {
+    setState(() {
+      _isDeleting = true;
+    });
+    HapticFeedback.heavyImpact();
+    SoundManager.playDeleteHistory(); // playDeleteHistory instead of playRetroClick
+    _controller.forward().then((_) {
+      widget.onDelete();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Determine the name of the zone
+    final String zoneName;
+    if (widget.session.loops.isNotEmpty) {
+      zoneName = widget.session.loops.first.name ?? "GHOST_ZONE";
+    } else {
+      zoneName = "GHOST_ZONE";
+    }
+
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, child) {
+        return SizeTransition(
+          sizeFactor: _heightFactorAnimation,
+          axis: Axis.vertical,
+          child: SlideTransition(
+            position: _slideAnimation,
+            child: FadeTransition(
+              opacity: _fadeAnimation,
+              child: child,
+            ),
+          ),
+        );
+      },
+      child: Container(
+        constraints: const BoxConstraints(minHeight: 72),
+        decoration: const BoxDecoration(
+          color: Color(0xFF0A0A0A),
+          border: Border(
+            bottom: BorderSide(color: Color(0xFF2A2A2A), width: 1.0),
           ),
         ),
-      ],
+        child: Row(
+          children: [
+            // Left Accent Bar (3px width)
+            Container(
+              width: 3,
+              height: 72,
+              color: widget.session.loopCount > 0
+                  ? const Color(0xFFB8FF00) // HELD lime green #B8FF00
+                  : const Color(0xFF4A4A4A), // Ghost grey
+            ),
+            const SizedBox(width: 16),
+            
+            // Text Details
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 12.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    // Date & Time (JetBrains Mono 11px #888888 uppercase)
+                    Text(
+                      widget.session.dateTime.toUpperCase(),
+                      style: GoogleFonts.jetBrainsMono(
+                        color: const Color(0xFF888888),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w400,
+                        letterSpacing: 11 * 0.06,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    // Zone name (Space Grotesk 700 16px uppercase)
+                    Text(
+                      zoneName.toUpperCase(),
+                      style: GoogleFonts.spaceGrotesk(
+                        color: const Color(0xFFEBEBEB),
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 16 * 0.04,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    // Stats line (JetBrains Mono 11px #888888)
+                    Row(
+                      children: [
+                        Text(
+                          "${widget.session.steps} STEPS · ${widget.session.distanceKm.toStringAsFixed(2)} KM · ${widget.session.loopCount} LOOPS",
+                          style: GoogleFonts.jetBrainsMono(
+                            color: const Color(0xFF888888),
+                            fontSize: 11,
+                            fontWeight: FontWeight.w400,
+                            letterSpacing: 11 * 0.06,
+                          ),
+                        ),
+                        if (widget.session.loopCount > 0) ...[
+                          const SizedBox(width: 6),
+                          Text(
+                            "✦",
+                            style: GoogleFonts.jetBrainsMono(
+                              color: const Color(0xFFB8FF00), // Lime green #B8FF00
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            
+            // Delete Action Trigger
+            IconButton(
+              icon: const Icon(Icons.delete_outline_outlined, color: Color(0xFFFF3B3B), size: 22),
+              onPressed: _isDeleting ? null : _startDeleteAnimation,
+            ),
+            const SizedBox(width: 16),
+          ],
+        ),
+      ),
     );
   }
 }

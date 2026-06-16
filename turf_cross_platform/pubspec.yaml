@@ -14,6 +14,7 @@ dependencies:
   # Navigation & State management
   cupertino_icons: ^1.0.6
   provider: ^6.1.2
+  google_fonts: ^6.2.1
 
   # Maps & Core Location APIs
   google_maps_flutter: ^2.5.3
@@ -36,6 +37,7 @@ dependencies:
   # Cloud Sync & Database
   supabase_flutter: ^2.6.0
   google_sign_in: ^6.2.1
+  flutter_svg: ^2.3.0
 
 dev_dependencies:
   flutter_test:
@@ -43,8 +45,28 @@ dev_dependencies:
   flutter_lints: ^3.0.0
   isar_generator: ^3.1.0+1
   build_runner: ^2.4.9
+  flutter_launcher_icons: ^0.14.4
 
 flutter:
   uses-material-design: true
   assets:
     - assets/map_style.json
+    - assets/google_logo.png
+    - assets/turf_logo.svg
+    - assets/sfx_button_click.wav
+    - assets/sfx_start_walk.wav
+    - assets/sfx_end_walk.wav
+    - assets/sfx_login.wav
+    - assets/sfx_logout.wav
+    - assets/sfx_recenter.wav
+    - assets/sfx_delete_history.wav
+    - assets/turf_app_logo.png
+
+flutter_launcher_icons:
+  android: "ic_launcher"
+  ios: true
+  image_path: "assets/turf_app_logo.png"
+  remove_alpha_ios: true
+  background_color_ios: "#000000"
+  adaptive_icon_background: "#000000"
+  adaptive_icon_foreground: "assets/turf_app_logo.png"

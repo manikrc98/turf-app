@@ -1,8 +1,9 @@
 import 'dart:async';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show rootBundle;
+import 'package:flutter/services.dart' show rootBundle, HapticFeedback;
 import 'package:flutter_compass/flutter_compass.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:provider/provider.dart';
@@ -16,7 +17,8 @@ import '../models/turf_loop.dart';
 import '../models/claimed_loop.dart';
 import '../models/local_walk_session.dart';
 import '../repositories/isar_service.dart';
-import 'history_bottom_sheet.dart';
+import '../location/sound_manager.dart'; // Import SoundManager
+import 'history_bottom_sheet.dart'; // Contains HistoryView
 import 'summary_bottom_sheet.dart';
 import 'marker_generator.dart';
 import 'package:isar/isar.dart';
@@ -39,10 +41,8 @@ class _MapScreenState extends State<MapScreen> {
   BitmapDescriptor? _dotIcon;
   double _currentZoom = 17.0;
 
-  // Bottom Sheet height tracker for repositioning the FAB dynamically
-  double _bottomSheetHeight = 140.0;
-  final double _bottomSheetPeekHeight = 140.0;
-  final double _bottomSheetMaxHeight = 350.0;
+  // Tab Navigation State
+  int _currentTabIndex = 0; // 0 = MAP, 1 = HISTORY, 2 = MORE
 
   // Stream Subscriptions
   StreamSubscription<TurfLoop>? _loopCapturedSubscription;
@@ -61,6 +61,8 @@ class _MapScreenState extends State<MapScreen> {
   String _lastCacheStateKey = "";
   final Map<String, BitmapDescriptor> _cardMarkerCache = {};
   final Map<String, BitmapDescriptor> _textMarkerCache = {};
+  String? _mapStyleString;
+  bool _mapReady = false;
 
   @override
   void initState() {
@@ -103,9 +105,17 @@ class _MapScreenState extends State<MapScreen> {
     final userIcon = await MarkerGenerator.createUserPositionMarker(pixelRatio);
     final dotIcon = await MarkerGenerator.createDotMarker(pixelRatio);
     
+    String? mapStyle;
+    try {
+      mapStyle = await rootBundle.loadString('assets/map_style.json');
+    } catch (e) {
+      print("Error loading map style: $e");
+    }
+    
     setState(() {
       _userIcon = userIcon;
       _dotIcon = dotIcon;
+      _mapStyleString = mapStyle;
     });
   }
 
@@ -125,10 +135,11 @@ class _MapScreenState extends State<MapScreen> {
       scaffoldMessenger.showSnackBar(
         SnackBar(
           content: Text(
-            "Claimed Loop '${claim.name}' covered! 🔥 Streak: ${claim.streakCount} days (Covered ${claim.coveredCountToday} times today)",
-            style: const TextStyle(fontWeight: FontWeight.bold),
+            "CLAIMED LOOP '${claim.name.toUpperCase()}' COVERED. STREAK: ${claim.streakCount} DAYS",
+            style: GoogleFonts.jetBrainsMono(fontWeight: FontWeight.bold, color: const Color(0xFFB8FF00)), // Lime green
           ),
-          backgroundColor: Colors.green,
+          backgroundColor: const Color(0xFF141414),
+          shape: const RoundedRectangleBorder(borderRadius: BorderRadius.zero),
           duration: const Duration(seconds: 4),
         ),
       );
@@ -214,9 +225,9 @@ class _MapScreenState extends State<MapScreen> {
   Widget build(BuildContext context) {
     if (!_permissionsChecked) {
       return const Scaffold(
-        backgroundColor: Color(0xFF0F172A),
+        backgroundColor: Color(0xFF0A0A0A),
         body: Center(
-          child: CircularProgressIndicator(color: Color(0xFF2196F3)),
+          child: CircularProgressIndicator(color: Color(0xFFB8FF00)), // Lime green
         ),
       );
     }
@@ -227,7 +238,7 @@ class _MapScreenState extends State<MapScreen> {
 
     final trackingProvider = Provider.of<LocationTrackingProvider>(context);
 
-    // Handle asynchronous pre-caching of loop markers when the database state changes
+    // Pre-cache custom map markers
     final cacheKey = _getCacheStateKey(trackingProvider);
     if (cacheKey != _lastCacheStateKey) {
       _lastCacheStateKey = cacheKey;
@@ -237,194 +248,744 @@ class _MapScreenState extends State<MapScreen> {
     }
 
     return Scaffold(
-      backgroundColor: const Color(0xFF0F172A),
-      drawer: _buildNavigationDrawer(trackingProvider),
-      body: Stack(
-        children: [
-          // 1. Google Map View
-          GoogleMap(
-            initialCameraPosition: const CameraPosition(
-              target: LatLng(0.0, 0.0),
-              zoom: 17.0,
-            ),
-            myLocationButtonEnabled: false,
-            myLocationEnabled: false,
-            compassEnabled: true,
-            zoomControlsEnabled: false,
-            mapType: MapType.normal,
-            polylines: _buildPolylines(trackingProvider),
-            polygons: _buildPolygons(trackingProvider),
-            markers: _buildMarkersSync(trackingProvider),
-            onMapCreated: (GoogleMapController controller) async {
-              _mapController.complete(controller);
-              // Load dark map style JSON from assets
-              try {
-                final styleStr = await rootBundle.loadString('assets/map_style.json');
-                controller.setMapStyle(styleStr);
-              } catch (e) {
-                print("Error loading map style assets: $e");
-              }
-            },
-            onCameraMoveStarted: () {
-              if (!_isProgrammaticMovement) {
-                _shouldFollowCamera = false;
-              }
-              _isProgrammaticMovement = false;
-            },
-            onCameraMove: (CameraPosition position) {
-              _currentZoom = position.zoom;
-            },
-            onCameraIdle: () async {
-              if (mounted) {
-                setState(() {});
-              }
+      backgroundColor: const Color(0xFF0A0A0A),
+      body: SafeArea(
+        bottom: false,
+        child: Column(
+          children: [
+            // Top HUD coordinates ticker (Only in MAP tab)
+            if (_currentTabIndex == 0)
+              Consumer<TrackingMetricsProvider>(
+                builder: (context, metricsProvider, _) {
+                  final bool isActive = metricsProvider.sessionStatus == SessionStatus.active;
+                  return _buildStatusBarHUD(isActive);
+                },
+              ),
 
-              try {
-                final controller = await _mapController.future;
-                final LatLngBounds bounds = await controller.getVisibleRegion();
-                final LatLng cameraCenter = LatLng(
-                  (bounds.northeast.latitude + bounds.southwest.latitude) / 2,
-                  (bounds.northeast.longitude + bounds.southwest.longitude) / 2,
-                );
+            // Tab Content
+            Expanded(
+              child: IndexedStack(
+                index: _currentTabIndex,
+                children: [
+                  // Tab 0: Map HUD Stack
+                  Stack(
+                    children: [
+                      // Google Map View
+                      if (_mapStyleString == null)
+                        const Positioned.fill(
+                          child: Center(
+                            child: CircularProgressIndicator(color: Color(0xFFB8FF00)),
+                          ),
+                        )
+                      else
+                        GoogleMap(
+                          style: _mapStyleString,
+                          initialCameraPosition: const CameraPosition(
+                            target: LatLng(0.0, 0.0),
+                            zoom: 17.0,
+                          ),
+                          myLocationButtonEnabled: false,
+                          myLocationEnabled: false,
+                          compassEnabled: false, // Turn off native compass for HUD feel
+                          zoomControlsEnabled: false,
+                          mapType: MapType.normal,
+                          polylines: _buildPolylines(trackingProvider),
+                          polygons: _buildPolygons(trackingProvider),
+                          markers: _buildMarkersSync(trackingProvider),
+                          onMapCreated: (GoogleMapController controller) async {
+                            _mapController.complete(controller);
+                            // Hide native map load pops (e.g. style initialization flash)
+                            await Future.delayed(const Duration(milliseconds: 1000));
+                            if (mounted) {
+                              setState(() {
+                                _mapReady = true;
+                              });
+                            }
+                          },
+                        onCameraMoveStarted: () {
+                          if (!_isProgrammaticMovement) {
+                            _shouldFollowCamera = false;
+                          }
+                          _isProgrammaticMovement = false;
+                        },
+                        onCameraMove: (CameraPosition position) {
+                          _currentZoom = position.zoom;
+                        },
+                        onCameraIdle: () async {
+                          if (mounted) {
+                            setState(() {});
+                          }
 
-                // Only sync if camera moved > 1000m from the last synced camera center
-                if (_lastSyncCameraCenter == null ||
-                    LoopDetector.calculateDistanceMetres(
-                          _lastSyncCameraCenter!.latitude,
-                          _lastSyncCameraCenter!.longitude,
-                          cameraCenter.latitude,
-                          cameraCenter.longitude,
-                        ) >
-                        1000.0) {
-                  _lastSyncCameraCenter = cameraCenter;
-                  if (mounted) {
-                    final syncProvider = Provider.of<SupabaseSyncProvider>(context, listen: false);
-                    await syncProvider.pullClaims(center: cameraCenter);
-                  }
-                }
-              } catch (e) {
-                print("Failed to sync on camera idle: $e");
-              }
-            },
-          ),
+                          try {
+                            final controller = await _mapController.future;
+                            final LatLngBounds bounds = await controller.getVisibleRegion();
+                            final LatLng cameraCenter = LatLng(
+                              (bounds.northeast.latitude + bounds.southwest.latitude) / 2,
+                              (bounds.northeast.longitude + bounds.southwest.longitude) / 2,
+                            );
 
-          // 2. Map HUD Buttons (Drawer trigger)
-          Positioned(
-            top: MediaQuery.of(context).padding.top + 12.0,
-            left: 16.0,
-            child: Builder(
-              builder: (context) => FloatingActionButton(
-                backgroundColor: const Color(0xFF1E293B),
-                mini: true,
-                onPressed: () => Scaffold.of(context).openDrawer(),
-                child: const Icon(Icons.menu_rounded, color: Colors.white),
+                            if (_lastSyncCameraCenter == null ||
+                                LoopDetector.calculateDistanceMetres(
+                                      _lastSyncCameraCenter!.latitude,
+                                      _lastSyncCameraCenter!.longitude,
+                                      cameraCenter.latitude,
+                                      cameraCenter.longitude,
+                                    ) >
+                                    1000.0) {
+                              _lastSyncCameraCenter = cameraCenter;
+                              if (mounted) {
+                                final syncProvider = Provider.of<SupabaseSyncProvider>(context, listen: false);
+                                await syncProvider.pullClaims(center: cameraCenter);
+                              }
+                            }
+                          } catch (e) {
+                            print("Failed to sync on camera idle: $e");
+                          }
+                        },
+                      ),
+
+                      // Overlay to fade transition the native map load pop
+                      if (_mapStyleString != null)
+                        Positioned.fill(
+                          child: AnimatedOpacity(
+                            opacity: _mapReady ? 0.0 : 1.0,
+                            duration: const Duration(milliseconds: 350),
+                            child: IgnorePointer(
+                              ignoring: _mapReady,
+                              child: Container(
+                                color: const Color(0xFF0A0A0A),
+                                child: const Center(
+                                  child: CircularProgressIndicator(
+                                    color: Color(0xFFB8FF00),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+
+                      // Status Chips (Paused / GPS Signal)
+                      Positioned(
+                        top: 16.0,
+                        right: 16.0,
+                        child: Selector<TrackingMetricsProvider, SessionStatus>(
+                          selector: (_, p) => p.sessionStatus,
+                          builder: (context, status, _) {
+                            final isWeak = trackingProvider.gpsSignalWeak;
+                            return Column(
+                              crossAxisAlignment: CrossAxisAlignment.end,
+                              children: [
+                                if (status == SessionStatus.paused)
+                                  _buildStatusChip("WALK_PAUSED", const Color(0xFFFF6B00)),
+                                if (isWeak && status == SessionStatus.active)
+                                  const SizedBox(height: 8),
+                                if (isWeak && status == SessionStatus.active)
+                                  _buildStatusChip("WEAK_GPS_SIGNAL", const Color(0xFFFF3B3B)),
+                              ],
+                            );
+                          },
+                        ),
+                      ),
+
+                      // Location FAB
+                      Selector<TrackingMetricsProvider, SessionStatus>(
+                        selector: (_, p) => p.sessionStatus,
+                        builder: (context, status, _) {
+                          // Position FAB 88px above screen bottom (bottom navigation clearance is 64px)
+                          // If active walk sheet is open, we offset it slightly above sheet height to avoid overlapping.
+                          final double bottomOffset = status == SessionStatus.idle
+                              ? 88.0
+                              : 290.0;
+                          return Positioned(
+                            bottom: bottomOffset,
+                            right: 16.0,
+                            child: GestureDetector(
+                              onTap: () async {
+                                HapticFeedback.heavyImpact();
+                                SoundManager.playRecenter();
+                                _shouldFollowCamera = true;
+                                if (_currentLocation != null) {
+                                  _isProgrammaticMovement = true;
+                                  final controller = await _mapController.future;
+                                  controller.animateCamera(
+                                    CameraUpdate.newLatLngZoom(_currentLocation!, 17.0),
+                                  );
+                                }
+                              },
+                              child: Container(
+                                width: 44,
+                                height: 44,
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF1E1E1E),
+                                  border: Border.all(color: const Color(0xFF2A2A2A), width: 1.0),
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                child: const Center(
+                                  child: Icon(Icons.gps_fixed_outlined, color: Color(0xFF888888), size: 20),
+                                ),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+
+                      // Start Walk CTA (Only visible when Idle)
+                      Selector<TrackingMetricsProvider, SessionStatus>(
+                        selector: (_, p) => p.sessionStatus,
+                        builder: (context, status, _) {
+                          if (status != SessionStatus.idle) return const SizedBox.shrink();
+                          return Positioned(
+                            bottom: 16.0,
+                            left: 16.0,
+                            right: 16.0,
+                            child: CrtStartWalkButton(
+                              onPressed: () {
+                                HapticFeedback.heavyImpact();
+                                SoundManager.playStartWalk();
+                                trackingProvider.startWalk();
+                              },
+                            ),
+                          );
+                        },
+                      ),
+
+                      // Active Walk HUD Panel (Only visible when not Idle)
+                      _buildActiveWalkPanel(trackingProvider),
+                    ],
+                  ),
+
+                  // Tab 1: Walk History view
+                  const HistoryBottomSheet(), // Converted to full-screen view inside bottom sheet file
+
+                  // Tab 2: MORE Full-screen Menu
+                  _buildMoreTab(trackingProvider),
+                ],
               ),
             ),
-          ),
 
-          // 3. Status chips (Paused walk / Weak GPS signal)
-          Positioned(
-            top: MediaQuery.of(context).padding.top + 16.0,
-            right: 16.0,
-            child: Selector<TrackingMetricsProvider, SessionStatus>(
-              selector: (_, p) => p.sessionStatus,
-              builder: (context, status, _) {
-                final isWeak = trackingProvider.gpsSignalWeak;
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    if (status == SessionStatus.paused)
-                      _buildStatusChip("WALK PAUSED", const Color(0xFFFF9800)),
-                    if (isWeak && status == SessionStatus.active)
-                      const SizedBox(height: 8),
-                    if (isWeak && status == SessionStatus.active)
-                      _buildStatusChip("WEAK GPS SIGNAL", const Color(0xFFF44336)),
-                  ],
-                );
-              },
+            // 3-tab Bottom Navigation Bar
+            _buildBottomNav(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBottomNav() {
+    return Container(
+      height: 64.0 + MediaQuery.of(context).padding.bottom,
+      decoration: const BoxDecoration(
+        color: Color(0xFF0A0A0A),
+        border: Border(
+          top: BorderSide(color: Color(0xFF2A2A2A), width: 1.0),
+        ),
+      ),
+      padding: EdgeInsets.only(bottom: MediaQuery.of(context).padding.bottom),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceAround,
+        children: [
+          _buildNavItem(0, "MAP", Icons.map_outlined),
+          _buildNavItem(1, "HISTORY", Icons.history_outlined),
+          _buildNavItem(2, "MORE", Icons.more_horiz_outlined),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildNavItem(int index, String label, IconData icon) {
+    final bool isActive = _currentTabIndex == index;
+    final Color color = isActive ? const Color(0xFFB8FF00) : const Color(0xFF444444); // Lime green #B8FF00
+    return GestureDetector(
+      onTap: () {
+        HapticFeedback.heavyImpact();
+        SoundManager.playButtonClick();
+        setState(() {
+          _currentTabIndex = index;
+        });
+      },
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        width: 80,
+        alignment: Alignment.center,
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, size: 22, color: color),
+            const SizedBox(height: 4),
+            Text(
+              label,
+              style: GoogleFonts.jetBrainsMono(
+                color: color,
+                fontSize: 9,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 9 * 0.06,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMoreTab(LocationTrackingProvider trackingProvider) {
+    final syncProv = Provider.of<SupabaseSyncProvider>(context);
+    return Container(
+      color: const Color(0xFF0A0A0A),
+      width: double.infinity,
+      height: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 24.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            "// MORE",
+            style: GoogleFonts.jetBrainsMono(
+              color: const Color(0xFF444444),
+              fontSize: 11,
+              fontWeight: FontWeight.w400,
+              letterSpacing: 11 * 0.06,
             ),
           ),
-
-          // 4. Recenter FAB (Moves up dynamically when the bottom sheet is dragged open)
-          Selector<TrackingMetricsProvider, SessionStatus>(
-            selector: (_, p) => p.sessionStatus,
-            builder: (context, status, _) {
-              return Positioned(
-                bottom: (status == SessionStatus.idle 
-                    ? (95.0 + MediaQuery.of(context).padding.bottom) 
-                    : _bottomSheetHeight) + 16.0,
-                right: 16.0,
-                child: FloatingActionButton(
-                  backgroundColor: const Color(0xFF2196F3),
-                  onPressed: () async {
-                    _shouldFollowCamera = true;
-                    if (_currentLocation != null) {
-                      _isProgrammaticMovement = true;
-                      final controller = await _mapController.future;
-                      controller.animateCamera(
-                        CameraUpdate.newLatLngZoom(_currentLocation!, 17.0),
-                      );
-                    }
-                  },
-                  child: const Icon(Icons.my_location_rounded, color: Colors.white),
-                ),
-              );
-            },
-          ),
-
-          // 5. Sliding Bottom Sheet
-          _buildSlidingPanel(trackingProvider),
+          const SizedBox(height: 24),
+          _buildMoreRow("MY TURF", onTap: () {
+            HapticFeedback.heavyImpact();
+            SoundManager.playButtonClick();
+            _showMyTurfDialog(trackingProvider);
+          }),
+          _buildMoreRow("PROFILE", onTap: () {
+            HapticFeedback.heavyImpact();
+            SoundManager.playButtonClick();
+            _showProfileDialog(syncProv);
+          }),
+          _buildMoreRow("VERSION: 1.6.0 (V6)", isVersion: true),
         ],
+      ),
+    );
+  }
+
+  Widget _buildMoreRow(String label, {VoidCallback? onTap, bool isVersion = false}) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        height: 56,
+        decoration: const BoxDecoration(
+          border: Border(
+            bottom: BorderSide(color: Color(0xFF2A2A2A), width: 1.0),
+          ),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(
+              label,
+              style: GoogleFonts.spaceGrotesk(
+                color: isVersion ? const Color(0xFF888888) : const Color(0xFFEBEBEB),
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+                letterSpacing: 14 * 0.04,
+              ),
+            ),
+            if (!isVersion)
+              const Icon(Icons.arrow_forward_ios_outlined, size: 14, color: Color(0xFF444444)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildStatusBarHUD(bool isActive) {
+    final latStr = _currentLocation != null ? "${_currentLocation!.latitude.toStringAsFixed(4)}°" : "--";
+    final lngStr = _currentLocation != null ? "${_currentLocation!.longitude.toStringAsFixed(4)}°" : "--";
+    final readout = "SYS_STATUS: ONLINE · LAT: $latStr · LNG: $lngStr";
+    return Container(
+      height: 28,
+      width: double.infinity,
+      color: const Color(0xB30A0A0A), // rgba(10, 10, 10, 0.7)
+      alignment: Alignment.center,
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Text(
+          readout,
+          style: GoogleFonts.jetBrainsMono(
+            color: isActive ? const Color(0xFFB8FF00) : const Color(0xFF444444), // Lime green #B8FF00
+            fontSize: 10,
+            fontWeight: FontWeight.w400,
+            letterSpacing: 10 * 0.06,
+          ),
+        ),
       ),
     );
   }
 
   Widget _buildStatusChip(String text, Color color) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
         color: color,
-        borderRadius: BorderRadius.circular(20),
-        boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4, offset: Offset(0, 2))],
+        borderRadius: BorderRadius.circular(2), // 2px max radius for chips
       ),
       child: Text(
         text,
-        style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold),
+        style: GoogleFonts.jetBrainsMono(
+          color: Colors.white,
+          fontSize: 10,
+          fontWeight: FontWeight.w600,
+          letterSpacing: 10 * 0.06,
+        ),
       ),
+    );
+  }
+
+  Widget _buildActiveWalkPanel(LocationTrackingProvider locationProvider) {
+    return Consumer<TrackingMetricsProvider>(
+      builder: (context, metricsProvider, child) {
+        if (metricsProvider.sessionStatus == SessionStatus.idle) return const SizedBox.shrink();
+
+        final minutes = metricsProvider.durationSeconds ~/ 60;
+        final seconds = metricsProvider.durationSeconds % 60;
+        final durationStr = "${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}";
+
+        // Estimate perimeter percentage:
+        int percentage = 0;
+        if (metricsProvider.loopCount > 0) {
+          percentage = 100;
+        } else if (locationProvider.trailPoints.isNotEmpty) {
+          final double distanceMeters = metricsProvider.distanceKm * 1000.0;
+          percentage = (distanceMeters / 400.0 * 100).clamp(0, 99).toInt();
+        }
+
+        // Active walk sheet layout
+        return Positioned(
+          bottom: 0,
+          left: 0,
+          right: 0,
+          child: Container(
+            height: 280, // Fixed height to fit 2x3 grid and buttons
+            padding: const EdgeInsets.fromLTRB(16.0, 16.0, 16.0, 16.0),
+            decoration: const BoxDecoration(
+              color: Color(0xFF0A0A0A), // Styleguide dark bg
+              border: Border(
+                top: BorderSide(color: Color(0xFF2A2A2A), width: 1.0),
+              ),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // Top status line
+                Text(
+                  "CLAIM_WALK: IN_PROGRESS",
+                  style: GoogleFonts.jetBrainsMono(
+                    color: const Color(0xFFB8FF00), // Lime green #B8FF00
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 11 * 0.06,
+                  ),
+                ),
+                const SizedBox(height: 12),
+
+                // 2x3 metrics grid separated by 1px solid #2A2A2A lines
+                Expanded(
+                  child: Table(
+                    border: const TableBorder(
+                      horizontalInside: BorderSide(color: Color(0xFF2A2A2A), width: 1.0),
+                      verticalInside: BorderSide(color: Color(0xFF2A2A2A), width: 1.0),
+                    ),
+                    children: [
+                      TableRow(
+                        children: [
+                          _buildGridCell("STEPS", "${metricsProvider.steps}${metricsProvider.isStepEstimated ? ' (EST)' : ''}"),
+                          _buildGridCell("DISTANCE", "${metricsProvider.distanceKm.toStringAsFixed(2)} KM"),
+                          _buildGridCell("TIME", durationStr),
+                        ],
+                      ),
+                      TableRow(
+                        children: [
+                          _buildGridCell("LOOPS", "${metricsProvider.loopCount}"),
+                          _buildGridCell("CADENCE", "${metricsProvider.cadence} SPM"),
+                          _buildGridCell("ELEVATION", "${metricsProvider.elevationGainMetres.toStringAsFixed(1)} M"),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
+
+                // Perimeter Progress Bar
+                _buildPerimeterProgressBar(percentage),
+                const SizedBox(height: 16),
+
+                // Control Action Buttons
+                Row(
+                  children: [
+                    // Pause Button (Left half)
+                    Expanded(
+                      child: SizedBox(
+                        height: 44,
+                        child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF1E1E1E),
+                            foregroundColor: const Color(0xFF888888),
+                            elevation: 0,
+                            shape: const RoundedRectangleBorder(
+                              borderRadius: BorderRadius.zero,
+                              side: BorderSide(color: Color(0xFF2A2A2A), width: 1.0),
+                            ),
+                          ),
+                          onPressed: () {
+                            HapticFeedback.heavyImpact();
+                            SoundManager.playButtonClick();
+                            if (metricsProvider.sessionStatus == SessionStatus.active) {
+                              locationProvider.pauseWalk();
+                            } else {
+                              locationProvider.resumeWalk();
+                            }
+                          },
+                          child: Text(
+                            metricsProvider.sessionStatus == SessionStatus.active ? "PAUSE" : "RESUME",
+                            style: GoogleFonts.spaceGrotesk(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 14 * 0.04,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    // End Walk Button (Right half)
+                    Expanded(
+                      child: SizedBox(
+                        height: 44,
+                        child: OutlinedButton(
+                          style: OutlinedButton.styleFrom(
+                            backgroundColor: Colors.transparent,
+                            foregroundColor: const Color(0xFFFF3B3B),
+                            side: const BorderSide(color: Color(0xFFFF3B3B), width: 1.0),
+                            shape: const RoundedRectangleBorder(
+                              borderRadius: BorderRadius.zero,
+                            ),
+                          ),
+                          onPressed: () async {
+                            HapticFeedback.heavyImpact();
+                            SoundManager.playEndWalk();
+                            final controller = await _mapController.future;
+
+                            // Recenter map on path boundary before snapshot
+                            if (locationProvider.trailPoints.isNotEmpty) {
+                              _isProgrammaticMovement = true;
+                              try {
+                                if (locationProvider.trailPoints.length == 1) {
+                                  await controller.moveCamera(
+                                    CameraUpdate.newLatLngZoom(locationProvider.trailPoints.first, 17.0),
+                                  );
+                                } else {
+                                  final bounds = _getBounds(locationProvider.trailPoints);
+                                  await controller.moveCamera(
+                                    CameraUpdate.newLatLngBounds(bounds, 50.0),
+                                  );
+                                }
+                              } catch (e) {
+                                print("Camera bounds movement failed: $e");
+                                try {
+                                  await controller.moveCamera(
+                                    CameraUpdate.newLatLngZoom(locationProvider.trailPoints.last, 17.0),
+                                  );
+                                } catch (_) {}
+                              }
+                            }
+
+                            await Future.delayed(const Duration(milliseconds: 300));
+
+                            Uint8List? snapshotBytes;
+                            try {
+                              snapshotBytes = await controller.takeSnapshot();
+                            } catch (e) {
+                              print("Failed to take map snapshot: $e");
+                            }
+
+                            final summary = await locationProvider.endWalk();
+
+                            if (summary != null) {
+                              final syncProvider = Provider.of<SupabaseSyncProvider>(context, listen: false);
+                              if (syncProvider.currentUserId != null) {
+                                await syncProvider.syncCompletedWalk(summary);
+                                try {
+                                  final isar = await IsarService.getDB();
+                                  final localSession = await isar.localWalkSessions
+                                      .filter()
+                                      .sessionIdEqualTo(summary.id)
+                                      .findFirst();
+                                  if (localSession != null) {
+                                    localSession.isSynced = true;
+                                    await isar.writeTxn(() async {
+                                      await isar.localWalkSessions.put(localSession);
+                                    });
+                                  }
+                                } catch (e) {
+                                  print("Failed to mark walk session as synced locally: $e");
+                                }
+                              }
+
+                              if (mounted) {
+                                SummaryBottomSheet.show(
+                                  context: context,
+                                  zoneName: summary.loops.isNotEmpty
+                                      ? (summary.loops.first.name ?? "GHOST_ZONE")
+                                      : "GHOST_ZONE",
+                                  mapSnapshot: snapshotBytes,
+                                  steps: summary.steps,
+                                  isStepEstimated: summary.isStepEstimated,
+                                  distanceKm: summary.distanceKm,
+                                  loops: summary.loopCount,
+                                  durationSeconds: summary.durationSeconds,
+                                  cadence: summary.cadence,
+                                  elevationGainMetres: summary.elevationGainMetres,
+                                  onDone: () => setState(() {}),
+                                );
+                              }
+                            }
+                          },
+                          child: Text(
+                            "END WALK",
+                            style: GoogleFonts.spaceGrotesk(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 14 * 0.04,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildGridCell(String label, String value) {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Text(
+            label,
+            style: GoogleFonts.jetBrainsMono(
+              color: const Color(0xFF888888),
+              fontSize: 10,
+              fontWeight: FontWeight.w400,
+              letterSpacing: 10 * 0.06,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            value,
+            style: GoogleFonts.spaceGrotesk(
+              color: const Color(0xFFEBEBEB),
+              fontSize: 20,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPerimeterProgressBar(int percentage) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(
+              "PERIMETER",
+              style: GoogleFonts.jetBrainsMono(
+                color: const Color(0xFF888888),
+                fontSize: 10,
+                fontWeight: FontWeight.w400,
+                letterSpacing: 10 * 0.06,
+              ),
+            ),
+            Text(
+              "$percentage%",
+              style: GoogleFonts.jetBrainsMono(
+                color: const Color(0xFFB8FF00), // Lime green #B8FF00
+                fontSize: 10,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 10 * 0.06,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 6),
+        Container(
+          height: 3,
+          width: double.infinity,
+          color: const Color(0xFF2A2A2A),
+          alignment: Alignment.centerLeft,
+          child: FractionallySizedBox(
+            widthFactor: percentage / 100.0,
+            child: Container(
+              color: const Color(0xFFB8FF00), // Lime green #B8FF00
+            ),
+          ),
+        ),
+      ],
     );
   }
 
   Widget _buildPermissionDeniedUI() {
     return Scaffold(
-      backgroundColor: const Color(0xFF0F172A),
+      backgroundColor: const Color(0xFF0A0A0A),
       body: Center(
         child: Padding(
           padding: const EdgeInsets.all(24.0),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              const Icon(Icons.location_off_rounded, size: 80, color: Colors.redAccent),
+              const Icon(Icons.location_off_outlined, size: 80, color: Color(0xFFFF3B3B)),
               const SizedBox(height: 24),
-              const Text(
-                "Permissions Required",
-                style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold),
+              Text(
+                "PERMISSIONS REQUIRED",
+                style: GoogleFonts.spaceGrotesk(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 12),
-              const Text(
-                "TURF requires background location access to map your paths, calculate elevation, and count your steps.",
+              Text(
+                "TURF REQUIRES BACKGROUND LOCATION ACCESS TO MAP YOUR PATHS AND CALCULATE STATS.",
                 textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.white70, fontSize: 14),
+                style: GoogleFonts.jetBrainsMono(color: const Color(0xFF888888), fontSize: 12),
               ),
               const SizedBox(height: 32),
-              ElevatedButton(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF2196F3),
-                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+              SizedBox(
+                width: double.infinity,
+                height: 48,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFFB8FF00), // Lime green #B8FF00
+                    foregroundColor: Colors.black,
+                    shape: const RoundedRectangleBorder(borderRadius: BorderRadius.zero),
+                  ),
+                  onPressed: () {
+                    HapticFeedback.heavyImpact();
+                    SoundManager.playButtonClick();
+                    if (_permissionDeniedPermanently) {
+                      Geolocator.openAppSettings();
+                    } else {
+                      _checkPermissionsAndInit();
+                    }
+                  },
+                  child: Text(
+                    _permissionDeniedPermanently ? "OPEN SETTINGS" : "GRANT PERMISSIONS",
+                    style: GoogleFonts.spaceGrotesk(fontWeight: FontWeight.bold),
+                  ),
                 ),
-                onPressed: _permissionDeniedPermanently
-                    ? () => Geolocator.openAppSettings()
-                    : _checkPermissionsAndInit,
-                child: Text(_permissionDeniedPermanently ? "Open Settings" : "Grant Permissions"),
               ),
             ],
           ),
@@ -433,181 +994,9 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
-  Widget _buildDrawerHeader() {
-    return Container(
-      padding: EdgeInsets.fromLTRB(16, 24 + MediaQuery.of(context).padding.top, 16, 20),
-      color: const Color(0xFF0F172A),
-      width: double.infinity,
-      child: Consumer<SupabaseSyncProvider>(
-        builder: (context, syncProv, _) {
-          final bool isLoggedIn = syncProv.currentUserId != null;
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  CircleAvatar(
-                    radius: 28,
-                    backgroundColor: const Color(0xFF1E293B),
-                    backgroundImage: isLoggedIn && syncProv.currentUsername != null
-                        ? NetworkImage('https://api.dicebear.com/7.x/bottts/png?seed=${syncProv.currentUsername}')
-                        : null,
-                    child: !isLoggedIn
-                        ? const Icon(Icons.account_circle, size: 56, color: Colors.white30)
-                        : null,
-                  ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          isLoggedIn ? (syncProv.currentUsername ?? "User") : "Guest Mode",
-                          style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
-                        ),
-                        Text(
-                          isLoggedIn ? "Signed in 🏆" : "Offline-first play",
-                          style: const TextStyle(color: Colors.white54, fontSize: 12),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              if (syncProv.isSyncing)
-                const SizedBox(
-                  height: 36,
-                  child: Center(child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF2196F3))),
-                )
-              else if (!isLoggedIn)
-                Row(
-                  children: [
-                    Expanded(
-                      child: ElevatedButton.icon(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF2196F3),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                          padding: const EdgeInsets.symmetric(vertical: 8),
-                        ),
-                        icon: const Icon(Icons.login_rounded, size: 16, color: Colors.white),
-                        label: const Text("Sign In with Google", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white)),
-                        onPressed: () async {
-                          final success = await syncProv.signInWithGoogle();
-                          if (!success) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text("Google Sign-In failed or cancelled.")),
-                            );
-                          }
-                        },
-                      ),
-                    ),
-                  ],
-                )
-              else
-                OutlinedButton.icon(
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: Colors.redAccent,
-                    side: const BorderSide(color: Colors.redAccent),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  ),
-                  icon: const Icon(Icons.logout_rounded, size: 14),
-                  label: const Text("Sign Out", style: TextStyle(fontSize: 11)),
-                  onPressed: () => syncProv.signOut(),
-                ),
-            ],
-          );
-        },
-      ),
-    );
-  }
-
-
-  Widget _buildNavigationDrawer(LocationTrackingProvider provider) {
-    return Drawer(
-      backgroundColor: const Color(0xFF1E293B),
-      child: Column(
-        children: [
-          _buildDrawerHeader(),
-          ListTile(
-            leading: const Icon(Icons.map_rounded, color: Colors.white70),
-            title: const Text("Track Walk", style: TextStyle(color: Colors.white)),
-            onTap: () => Navigator.pop(context),
-          ),
-          ListTile(
-            leading: const Icon(Icons.history_rounded, color: Colors.white70),
-            title: const Text("Walk History", style: TextStyle(color: Colors.white)),
-            onTap: () {
-              Navigator.pop(context);
-              HistoryBottomSheet.show(context, () {
-                setState(() {}); // Redraw map overlays when sheet closes
-              });
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.info_outline_rounded, color: Colors.white70),
-            title: const Text("Version History", style: TextStyle(color: Colors.white)),
-            onTap: () {
-              Navigator.pop(context);
-              _showVersionHistoryDialog();
-            },
-          ),
-          ExpansionTile(
-            leading: const Icon(Icons.stars_rounded, color: Colors.amber),
-            title: const Text("Claimed Loops", style: TextStyle(color: Colors.white)),
-            iconColor: Colors.white70,
-            collapsedIconColor: Colors.white54,
-            childrenPadding: const EdgeInsets.symmetric(horizontal: 16.0),
-            children: [
-              if (provider.cachedClaimedLoops.isEmpty)
-                const Padding(
-                  padding: EdgeInsets.all(12.0),
-                  child: Text("No claimed loops yet", style: TextStyle(color: Colors.white30, fontSize: 13)),
-                )
-              else
-                ...provider.cachedClaimedLoops.map((claim) {
-                  return ListTile(
-                    dense: true,
-                    contentPadding: EdgeInsets.zero,
-                    title: Text(claim.name, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w500)),
-                    subtitle: Text(claim.isMyClaim ? "Owned by me" : "Claimed by: ${claim.ownerName}", style: const TextStyle(color: Colors.white54, fontSize: 11)),
-                    trailing: const Icon(Icons.chevron_right_rounded, color: Colors.white30, size: 16),
-                    onTap: () async {
-                      Navigator.pop(context); // Close drawer
-                      final centroid = _getCentroid(claim.points);
-                      final controller = await _mapController.future;
-                      _shouldFollowCamera = false;
-                      _isProgrammaticMovement = true;
-                      await controller.animateCamera(CameraUpdate.newLatLngZoom(centroid, 17.0));
-                      _showClaimedLoopDetailDialog(claim);
-                    },
-                  );
-                }).toList(),
-            ],
-          ),
-          const Spacer(),
-          GestureDetector(
-            onTap: () {
-              Navigator.pop(context);
-              _showVersionHistoryDialog();
-            },
-            child: const Padding(
-              padding: EdgeInsets.all(16.0),
-              child: Text(
-                "TURF v1.6.0 (v6)",
-                style: TextStyle(color: Colors.white30, fontSize: 12, decoration: TextDecoration.underline),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
   String _getCacheStateKey(LocationTrackingProvider provider) {
     final claimedPart = provider.cachedClaimedLoops
-        .map((c) => "${c.id}_${c.streakCount}_${c.coveredCountToday}_${c.isActive}")
+        .map((c) => "${c.id}_${c.streakCount}_${c.coveredCountToday}_${c.isActive}_${c.isMyClaim}")
         .join(",");
     final capturedPart = provider.capturedLoops
         .map((l) => "${l.id}_${l.name ?? ''}")
@@ -620,9 +1009,9 @@ class _MapScreenState extends State<MapScreen> {
     final double pixelRatio = MediaQuery.of(context).devicePixelRatio;
     bool cacheUpdated = false;
 
-    // Pre-cache claimed loops in provider.cachedClaimedLoops
+    // Pre-cache claimed loops
     for (var claim in provider.cachedClaimedLoops) {
-      final cacheKey = "${claim.id}_${claim.streakCount}_${claim.coveredCountToday}_${claim.isActive}";
+      final cacheKey = "${claim.id}_${claim.streakCount}_${claim.coveredCountToday}_${claim.isActive}_${claim.isMyClaim}";
       if (!_cardMarkerCache.containsKey(cacheKey)) {
         try {
           final descriptor = await MarkerGenerator.createCardMarker(
@@ -632,6 +1021,7 @@ class _MapScreenState extends State<MapScreen> {
             pixelRatio,
             claim.isActive,
             claim.ownerName,
+            claim.isMyClaim,
           );
           _cardMarkerCache[cacheKey] = descriptor;
           cacheUpdated = true;
@@ -661,7 +1051,6 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
-  /// Construct live tracking markers synchronously using cached assets
   Set<Marker> _buildMarkersSync(LocationTrackingProvider provider) {
     final Set<Marker> markers = {};
 
@@ -681,7 +1070,7 @@ class _MapScreenState extends State<MapScreen> {
       );
     }
 
-    // 2. Claimed loop label statistics cards
+    // 2. Claimed loop label cards
     final zoomInEnough = _currentZoom >= 15.5;
     for (var loop in provider.capturedLoops) {
       final claimedIndex = provider.cachedClaimedLoops.indexWhere((c) => c.id == loop.id);
@@ -689,11 +1078,11 @@ class _MapScreenState extends State<MapScreen> {
         final claim = provider.cachedClaimedLoops[claimedIndex];
         final center = _getMarkerNorthOffset(loop.points);
         
-        final cacheKey = "${claim.id}_${claim.streakCount}_${claim.coveredCountToday}_${claim.isActive}";
+        final cacheKey = "${claim.id}_${claim.streakCount}_${claim.coveredCountToday}_${claim.isActive}_${claim.isMyClaim}";
         final cachedIcon = _cardMarkerCache[cacheKey];
         
         final icon = zoomInEnough
-            ? (cachedIcon ?? _dotIcon) // Fallback to dot
+            ? (cachedIcon ?? _dotIcon)
             : _dotIcon;
 
         if (icon != null) {
@@ -709,11 +1098,10 @@ class _MapScreenState extends State<MapScreen> {
           );
         }
       } else if (loop.name != null && loop.name!.isNotEmpty) {
-        // Captured loop with custom name
         final center = _getCentroid(loop.points);
         if (zoomInEnough) {
           final cachedIcon = _textMarkerCache[loop.name!];
-          final icon = cachedIcon ?? _dotIcon; // Fallback to dot
+          final icon = cachedIcon ?? _dotIcon;
           if (icon != null) {
             markers.add(
               Marker(
@@ -736,11 +1124,11 @@ class _MapScreenState extends State<MapScreen> {
 
       final center = _getMarkerNorthOffset(claim.points);
       
-      final cacheKey = "${claim.id}_${claim.streakCount}_${claim.coveredCountToday}_${claim.isActive}";
+      final cacheKey = "${claim.id}_${claim.streakCount}_${claim.coveredCountToday}_${claim.isActive}_${claim.isMyClaim}";
       final cachedIcon = _cardMarkerCache[cacheKey];
       
       final icon = zoomInEnough
-          ? (cachedIcon ?? _dotIcon) // Fallback to dot
+          ? (cachedIcon ?? _dotIcon)
           : _dotIcon;
 
       if (icon != null) {
@@ -767,7 +1155,7 @@ class _MapScreenState extends State<MapScreen> {
         Polyline(
           polylineId: const PolylineId("active_trail"),
           points: provider.trailPoints,
-          color: provider.activeTrailColor ?? const Color(0xFFE53935), // Red
+          color: provider.activeTrailColor ?? const Color(0xFFB8FF00), // #B8FF00 for active trail
           width: 5,
           jointType: JointType.round,
           startCap: Cap.roundCap,
@@ -775,6 +1163,55 @@ class _MapScreenState extends State<MapScreen> {
         ),
       );
     }
+
+    // Add dashed strokes for GHOST captured loops
+    for (var loop in provider.capturedLoops) {
+      final claimedIndex = provider.cachedClaimedLoops.indexWhere((c) => c.id == loop.id);
+      if (claimedIndex == -1) {
+        final closedPoints = List<LatLng>.from(loop.points)..add(loop.points.first);
+        polylines.add(
+          Polyline(
+            polylineId: PolylineId("captured_stroke_${loop.id}"),
+            points: closedPoints,
+            color: const Color(0xFF4A4A4A),
+            width: 1,
+            patterns: [PatternItem.dash(10), PatternItem.gap(10)],
+          ),
+        );
+      } else {
+        final claim = provider.cachedClaimedLoops[claimedIndex];
+        if (!claim.isActive) {
+          final closedPoints = List<LatLng>.from(loop.points)..add(loop.points.first);
+          polylines.add(
+            Polyline(
+              polylineId: PolylineId("captured_stroke_${loop.id}"),
+              points: closedPoints,
+              color: const Color(0xFF4A4A4A),
+              width: 1,
+              patterns: [PatternItem.dash(10), PatternItem.gap(10)],
+            ),
+          );
+        }
+      }
+    }
+
+    // Add dashed strokes for GHOST claims
+    for (var claim in provider.cachedClaimedLoops) {
+      if (provider.capturedLoops.any((l) => l.id == claim.id)) continue;
+      if (!claim.isActive || claim.ownerId.isEmpty) {
+        final closedPoints = List<LatLng>.from(claim.points)..add(claim.points.first);
+        polylines.add(
+          Polyline(
+            polylineId: PolylineId("claim_stroke_${claim.id}"),
+            points: closedPoints,
+            color: const Color(0xFF4A4A4A),
+            width: 1,
+            patterns: [PatternItem.dash(10), PatternItem.gap(10)],
+          ),
+        );
+      }
+    }
+
     return polylines;
   }
 
@@ -784,345 +1221,226 @@ class _MapScreenState extends State<MapScreen> {
     // Render active captured loops
     for (var loop in provider.capturedLoops) {
       final claimedIndex = provider.cachedClaimedLoops.indexWhere((c) => c.id == loop.id);
-      Color color = const Color(0xFF4CAF50); // Unclaimed green
-      if (claimedIndex != -1) {
-        color = provider.cachedClaimedLoops[claimedIndex].getDynamicColor();
+      if (claimedIndex == -1) {
+        // Unclaimed: GHOST fill
+        polygons.add(
+          Polygon(
+            polygonId: PolygonId("captured_poly_${loop.id}"),
+            points: loop.points,
+            fillColor: const Color(0x144A4A4A), // rgba(74, 74, 74, 0.08)
+            strokeColor: Colors.transparent,
+            strokeWidth: 0,
+            consumeTapEvents: true,
+            onTap: () => _showClaimLoopDialog(loop),
+          ),
+        );
+      } else {
+        final claim = provider.cachedClaimedLoops[claimedIndex];
+        _addClaimPolygon(polygons, claim);
       }
-
-      polygons.add(
-        Polygon(
-          polygonId: PolygonId("captured_poly_${loop.id}"),
-          points: loop.points,
-          fillColor: color.withOpacity(0.3),
-          strokeColor: color.withOpacity(0.8),
-          strokeWidth: 3,
-          consumeTapEvents: true,
-          onTap: () {
-            if (claimedIndex != -1) {
-              _showClaimedLoopDetailDialog(provider.cachedClaimedLoops[claimedIndex]);
-            } else {
-              _showClaimLoopDialog(loop);
-            }
-          },
-        ),
-      );
     }
 
     // Render historical claimed loop areas
     for (var claim in provider.cachedClaimedLoops) {
       if (provider.capturedLoops.any((l) => l.id == claim.id)) continue;
-
-      final color = claim.getDynamicColor();
-      polygons.add(
-        Polygon(
-          polygonId: PolygonId("claim_poly_${claim.id}"),
-          points: claim.points,
-          fillColor: color.withOpacity(0.3),
-          strokeColor: color.withOpacity(0.8),
-          strokeWidth: 3,
-          consumeTapEvents: true,
-          onTap: () => _showClaimedLoopDetailDialog(claim),
-        ),
-      );
+      _addClaimPolygon(polygons, claim);
     }
 
     return polygons;
   }
 
-  Widget _buildSlidingPanel(LocationTrackingProvider locationProvider) {
-    return Consumer<TrackingMetricsProvider>(
-      builder: (context, metricsProvider, child) {
-        final minutes = metricsProvider.durationSeconds ~/ 60;
-        final seconds = metricsProvider.durationSeconds % 60;
-        final durationStr = "${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}";
-        final bool isIdle = metricsProvider.sessionStatus == SessionStatus.idle;
-
-        return Positioned(
-          bottom: 0,
-          left: 0,
-          right: 0,
-          child: GestureDetector(
-            onVerticalDragUpdate: isIdle
-                ? null
-                : (details) {
-                    setState(() {
-                      _bottomSheetHeight = (_bottomSheetHeight - details.delta.dy).clamp(_bottomSheetPeekHeight, _bottomSheetMaxHeight);
-                    });
-                  },
-            child: Container(
-              height: isIdle ? null : _bottomSheetHeight,
-              padding: EdgeInsets.fromLTRB(
-                20.0,
-                12.0,
-                20.0,
-                MediaQuery.of(context).padding.bottom + 14.0,
-              ),
-              decoration: const BoxDecoration(
-                color: Color(0xFF1E293B), // Premium Slate Dark
-                borderRadius: BorderRadius.vertical(top: Radius.circular(20.0)),
-                boxShadow: [BoxShadow(color: Colors.black38, blurRadius: 10, offset: Offset(0, -4))],
-              ),
-              child: SingleChildScrollView(
-                physics: const NeverScrollableScrollPhysics(),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    if (!isIdle) ...[
-                      // Drag Notch (only visible when panel is expandable)
-                      Center(
-                        child: Container(
-                          width: 36.0,
-                          height: 4.0,
-                          margin: const EdgeInsets.only(bottom: 12.0),
-                          decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(10)),
-                        ),
-                      ),
-                    ],
-                    // Session Status Specific buttons
-                    if (isIdle)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 8.0, bottom: 8.0),
-                        child: ElevatedButton(
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF2196F3),
-                            padding: const EdgeInsets.symmetric(vertical: 14),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                          ),
-                          onPressed: () => locationProvider.startWalk(),
-                          child: const Text("START WALK 🚶‍♂️", style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white)),
-                        ),
-                      )
-                    else ...[
-                      // Metrics display row
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceAround,
-                        children: [
-                          _buildMetricWidget("Steps", "${metricsProvider.steps}${metricsProvider.isStepEstimated ? ' (est)' : ''}"),
-                          _buildMetricWidget("Distance", "${metricsProvider.distanceKm.toStringAsFixed(2)} km"),
-                          _buildMetricWidget("Time", durationStr),
-                          _buildMetricWidget("Loops", "${metricsProvider.loopCount}"),
-                        ],
-                      ),
-                      const SizedBox(height: 12),
-                      // Extra Metrics row visible when sheet is expanded
-                      if (_bottomSheetHeight > 220) ...[
-                        const Divider(color: Colors.white12),
-                        const SizedBox(height: 8),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceAround,
-                          children: [
-                            _buildMetricWidget("Cadence", "${metricsProvider.cadence} SPM"),
-                            _buildMetricWidget("Elevation", "${metricsProvider.elevationGainMetres.toStringAsFixed(1)} m"),
-                          ],
-                        ),
-                        const SizedBox(height: 16),
-                      ],
-                      // Active control action buttons
-                      Row(
-                        children: [
-                          Expanded(
-                            child: ElevatedButton(
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: metricsProvider.sessionStatus == SessionStatus.active ? Colors.grey[700] : const Color(0xFF2196F3),
-                                padding: const EdgeInsets.symmetric(vertical: 12),
-                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                              ),
-                              onPressed: () {
-                                if (metricsProvider.sessionStatus == SessionStatus.active) {
-                                  locationProvider.pauseWalk();
-                                } else {
-                                  locationProvider.resumeWalk();
-                                }
-                              },
-                              child: Text(
-                                metricsProvider.sessionStatus == SessionStatus.active ? "Pause" : "Resume",
-                                style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: ElevatedButton(
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.red[600],
-                                padding: const EdgeInsets.symmetric(vertical: 12),
-                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                              ),
-                              onPressed: () async {
-                                final controller = await _mapController.future;
-
-                                // 1. Recenter/zoom to fit trail points bounds or user location before snapshot
-                                if (locationProvider.trailPoints.isNotEmpty) {
-                                  _isProgrammaticMovement = true;
-                                  try {
-                                    if (locationProvider.trailPoints.length == 1) {
-                                      await controller.moveCamera(
-                                        CameraUpdate.newLatLngZoom(locationProvider.trailPoints.first, 17.0),
-                                      );
-                                    } else {
-                                      final bounds = _getBounds(locationProvider.trailPoints);
-                                      await controller.moveCamera(
-                                        CameraUpdate.newLatLngBounds(bounds, 50.0),
-                                      );
-                                    }
-                                  } catch (e) {
-                                    print("Camera bounds movement failed: $e");
-                                    try {
-                                      await controller.moveCamera(
-                                        CameraUpdate.newLatLngZoom(locationProvider.trailPoints.last, 17.0),
-                                      );
-                                    } catch (_) {}
-                                  }
-                                }
-
-                                // 2. Wait 300ms for map tiles to redraw (matching native Android's delay)
-                                await Future.delayed(const Duration(milliseconds: 300));
-
-                                // 3. Take snapshot
-                                Uint8List? snapshotBytes;
-                                try {
-                                  snapshotBytes = await controller.takeSnapshot();
-                                } catch (e) {
-                                  print("Failed to take map snapshot: $e");
-                                }
-
-                                // 4. End the walk session
-                                final summary = await locationProvider.endWalk();
-
-                                // 5. Show summary bottom sheet
-                                if (summary != null) {
-                                  final syncProvider = Provider.of<SupabaseSyncProvider>(context, listen: false);
-                                  if (syncProvider.currentUserId != null) {
-                                    // Upload to Supabase and mark as synced locally
-                                    await syncProvider.syncCompletedWalk(summary);
-                                    try {
-                                      final isar = await IsarService.getDB();
-                                      final localSession = await isar.localWalkSessions
-                                          .filter()
-                                          .sessionIdEqualTo(summary.id)
-                                          .findFirst();
-                                      if (localSession != null) {
-                                        localSession.isSynced = true;
-                                        await isar.writeTxn(() async {
-                                          await isar.localWalkSessions.put(localSession);
-                                        });
-                                      }
-                                    } catch (e) {
-                                      print("Failed to mark walk session as synced locally: $e");
-                                    }
-                                  }
-
-                                  if (mounted) {
-                                    SummaryBottomSheet.show(
-                                      context: context,
-                                      mapSnapshot: snapshotBytes,
-                                      steps: summary.steps,
-                                      isStepEstimated: summary.isStepEstimated,
-                                      distanceKm: summary.distanceKm,
-                                      loops: summary.loopCount,
-                                      durationSeconds: summary.durationSeconds,
-                                      cadence: summary.cadence,
-                                      elevationGainMetres: summary.elevationGainMetres,
-                                      onDone: () => setState(() {}),
-                                    );
-                                  }
-                                }
-                              },
-                              child: const Text("End Walk", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white)),
-                            ),
-                          ),
-                        ],
-                      )
-                    ],
-                  ],
-                ),
-              ),
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildMetricWidget(String label, String value) {
-    return Column(
-      children: [
-        Text(label, style: const TextStyle(color: Colors.white38, fontSize: 12)),
-        const SizedBox(height: 4),
-        Text(
-          value,
-          style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
+  void _addClaimPolygon(Set<Polygon> polygons, ClaimedLoop claim) {
+    if (!claim.isActive || claim.ownerId.isEmpty) {
+      // Unclaimed / Ghost
+      polygons.add(
+        Polygon(
+          polygonId: PolygonId("claim_poly_${claim.id}"),
+          points: claim.points,
+          fillColor: const Color(0x144A4A4A), // rgba(74, 74, 74, 0.08)
+          strokeColor: Colors.transparent,
+          strokeWidth: 0,
+          consumeTapEvents: true,
+          onTap: () => _showClaimedLoopDetailDialog(claim),
         ),
-      ],
-    );
-  }
-
-  LatLngBounds _getBounds(List<LatLng> points) {
-    double minLat = points.first.latitude;
-    double maxLat = points.first.latitude;
-    double minLng = points.first.longitude;
-    double maxLng = points.first.longitude;
-    for (final point in points) {
-      if (point.latitude < minLat) minLat = point.latitude;
-      if (point.latitude > maxLat) maxLat = point.latitude;
-      if (point.longitude < minLng) minLng = point.longitude;
-      if (point.longitude > maxLng) maxLng = point.longitude;
+      );
+    } else if (claim.isMyClaim) {
+      // HELD (Owned)
+      polygons.add(
+        Polygon(
+          polygonId: PolygonId("claim_poly_${claim.id}"),
+          points: claim.points,
+          fillColor: const Color(0x26B8FF00), // rgba(184, 255, 0, 0.15)
+          strokeColor: const Color(0xFFB8FF00), // Lime green #B8FF00
+          strokeWidth: 2,
+          consumeTapEvents: true,
+          onTap: () => _showClaimedLoopDetailDialog(claim),
+        ),
+      );
+    } else {
+      // CONTESTED (Enemy owned)
+      polygons.add(
+        Polygon(
+          polygonId: PolygonId("claim_poly_${claim.id}"),
+          points: claim.points,
+          fillColor: const Color(0x26FF6B00), // rgba(255, 107, 0, 0.15)
+          strokeColor: const Color(0xFFFF6B00),
+          strokeWidth: 2,
+          consumeTapEvents: true,
+          onTap: () => _showClaimedLoopDetailDialog(claim),
+        ),
+      );
     }
-    return LatLngBounds(
-      southwest: LatLng(minLat, minLng),
-      northeast: LatLng(maxLat, maxLng),
-    );
   }
 
-  void _showVersionHistoryDialog() {
+  void _showMyTurfDialog(LocationTrackingProvider trackingProvider) {
+    final myClaims = trackingProvider.cachedClaimedLoops.where((c) => c.isMyClaim).toList();
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF1E293B),
-        title: const Text(
-          "Version Info & History",
-          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+        backgroundColor: const Color(0xFF141414),
+        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.zero),
+        title: Text(
+          "MY TURF",
+          style: GoogleFonts.spaceGrotesk(color: const Color(0xFFEBEBEB), fontWeight: FontWeight.bold, letterSpacing: 0.5),
         ),
-        content: SingleChildScrollView(
-          child: RichText(
-            text: const TextSpan(
-              style: TextStyle(color: Colors.white70, fontSize: 13.5, height: 1.4),
-              children: [
-                TextSpan(
-                  text: "TURF v1.6.0 (v6)\n",
-                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.white),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: myClaims.isEmpty
+              ? Text(
+                  "NO TURF YET. WALK A BLOCK. OWN IT.",
+                  style: GoogleFonts.jetBrainsMono(color: const Color(0xFF888888), fontSize: 11),
+                )
+              : ListView.separated(
+                  shrinkWrap: true,
+                  itemCount: myClaims.length,
+                  separatorBuilder: (_, __) => const Divider(color: Color(0xFF2A2A2A)),
+                  itemBuilder: (context, idx) {
+                    final claim = myClaims[idx];
+                    return ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(
+                        claim.name.toUpperCase(),
+                        style: GoogleFonts.spaceGrotesk(color: const Color(0xFFEBEBEB), fontWeight: FontWeight.bold),
+                      ),
+                      subtitle: Text(
+                        "STREAK: ${claim.streakCount} DAYS",
+                        style: GoogleFonts.jetBrainsMono(color: const Color(0xFFB8FF00), fontSize: 11), // Lime green #B8FF00
+                      ),
+                      trailing: const Icon(Icons.chevron_right_outlined, color: Color(0xFF888888)),
+                      onTap: () async {
+                        HapticFeedback.heavyImpact();
+                        SoundManager.playRecenter();
+                        Navigator.pop(context);
+                        setState(() {
+                          _currentTabIndex = 0; // Swap to MAP
+                        });
+                        final centroid = _getCentroid(claim.points);
+                        final controller = await _mapController.future;
+                        _shouldFollowCamera = false;
+                        _isProgrammaticMovement = true;
+                        await controller.animateCamera(CameraUpdate.newLatLngZoom(centroid, 17.0));
+                        _showClaimedLoopDetailDialog(claim);
+                      },
+                    );
+                  },
                 ),
-                TextSpan(text: "Latest version installed successfully.\n\n"),
-                TextSpan(
-                  text: "Version Changelog:\n",
-                  style: TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF2196F3)),
-                ),
-                TextSpan(
-                  text: "• v1.6.0 (v6) — Loop Claim & Name: Prompt to claim loops with a custom name upon capture, click active loops on map, and view names in history.\n\n",
-                ),
-                TextSpan(
-                  text: "• v1.5.0 (v5) — Advanced Metrics: Cadence in SPM, Elevation Gain/Climb in meters, and a live duration stopwatch tracker.\n\n",
-                ),
-                TextSpan(
-                  text: "• v1.4.0 (v4) — Directional Arrow: Dynamic flat-rotated user position marker based on real-time GPS bearing.\n\n",
-                ),
-                TextSpan(
-                  text: "• v1.3.0 (v3) — Persistent loops: Clickable historical loops drawn persistently on the map view.\n\n",
-                ),
-                TextSpan(
-                  text: "• v1.2.0 (v2) — Navigation & Logging: Drawer navigation, walk history session repository, and background crash logging.\n\n",
-                ),
-                TextSpan(
-                  text: "• v1.0.0 (v1) — Core Foundations: Fused Location updates, step tracking fallback, maps rendering, and foreground service tracking.",
-                ),
-              ],
-            ),
-          ),
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text("Awesome", style: TextStyle(fontWeight: FontWeight.bold)),
+            onPressed: () {
+              HapticFeedback.heavyImpact();
+              SoundManager.playButtonClick();
+              Navigator.pop(context);
+            },
+            child: Text(
+              "CLOSE",
+              style: GoogleFonts.spaceGrotesk(color: const Color(0xFFEBEBEB), fontWeight: FontWeight.bold),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showProfileDialog(SupabaseSyncProvider syncProv) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF141414),
+        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.zero),
+        title: Text(
+          "PROFILE",
+          style: GoogleFonts.spaceGrotesk(color: const Color(0xFFEBEBEB), fontWeight: FontWeight.bold, letterSpacing: 0.5),
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (syncProv.currentUserId != null) ...[
+              CircleAvatar(
+                radius: 32,
+                backgroundColor: const Color(0xFF1E1E1E),
+                backgroundImage: syncProv.currentUsername != null
+                    ? NetworkImage('https://api.dicebear.com/7.x/bottts/png?seed=${syncProv.currentUsername}')
+                    : null,
+              ),
+              const SizedBox(height: 16),
+              Text(
+                syncProv.currentUsername ?? "USER",
+                style: GoogleFonts.spaceGrotesk(color: const Color(0xFFEBEBEB), fontSize: 18, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                "STATUS: ONLINE",
+                style: GoogleFonts.jetBrainsMono(color: const Color(0xFFB8FF00), fontSize: 11), // Lime green #B8FF00
+              ),
+              const SizedBox(height: 24),
+              SizedBox(
+                width: double.infinity,
+                height: 48,
+                child: OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    backgroundColor: Colors.transparent,
+                    foregroundColor: const Color(0xFFFF3B3B),
+                    side: const BorderSide(color: Color(0xFFFF3B3B), width: 1.0),
+                    shape: const RoundedRectangleBorder(borderRadius: BorderRadius.zero),
+                  ),
+                  onPressed: () {
+                    HapticFeedback.heavyImpact();
+                    SoundManager.playLogout();
+                    syncProv.signOut();
+                    Navigator.pop(context);
+                  },
+                  child: Text(
+                    "SIGN OUT",
+                    style: GoogleFonts.spaceGrotesk(fontSize: 14, fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ),
+            ] else ...[
+              Text(
+                "SYS_STATUS: GUEST_MODE",
+                style: GoogleFonts.jetBrainsMono(color: const Color(0xFF888888), fontSize: 12),
+              ),
+              const SizedBox(height: 16),
+              Text(
+                "Sign in on launch to sync your scores to Supabase.",
+                style: GoogleFonts.inter(color: const Color(0xFF888888), fontSize: 13),
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              HapticFeedback.heavyImpact();
+              SoundManager.playButtonClick();
+              Navigator.pop(context);
+            },
+            child: Text(
+              "CLOSE",
+              style: GoogleFonts.spaceGrotesk(color: const Color(0xFFEBEBEB), fontWeight: FontWeight.bold),
+            ),
           ),
         ],
       ),
@@ -1135,37 +1453,54 @@ class _MapScreenState extends State<MapScreen> {
       context: context,
       barrierDismissible: false,
       builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF1E293B),
-        title: Text(loop.name != null ? "Rename Claimed Loop" : "Claim this Loop 🏆", style: const TextStyle(color: Colors.white)),
+        backgroundColor: const Color(0xFF141414),
+        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.zero),
+        title: Text(
+          loop.name != null ? "RENAME CLAIMED LOOP" : "CLAIM THIS LOOP",
+          style: GoogleFonts.spaceGrotesk(color: Colors.white, fontWeight: FontWeight.bold),
+        ),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text("Give this loop a custom name to claim it:", style: TextStyle(color: Colors.white70)),
+            Text(
+              "PROVIDE A SYSTEM NAME FOR THIS ZONE:",
+              style: GoogleFonts.jetBrainsMono(color: const Color(0xFF888888), fontSize: 11),
+            ),
             const SizedBox(height: 16),
             TextField(
               controller: textController,
               autofocus: true,
-              style: const TextStyle(color: Colors.white),
-              decoration: const InputDecoration(
-                hintText: "e.g. Park Path, Garden Walk",
-                hintStyle: TextStyle(color: Colors.white30),
-                enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.white30)),
-                focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: Color(0xFF2196F3))),
+              style: GoogleFonts.spaceGrotesk(color: Colors.white),
+              decoration: InputDecoration(
+                hintText: "e.g. KORAMANGALA_BLOCK_4",
+                hintStyle: GoogleFonts.jetBrainsMono(color: const Color(0xFF444444), fontSize: 12),
+                enabledBorder: const UnderlineInputBorder(borderSide: BorderSide(color: Color(0xFF2A2A2A))),
+                focusedBorder: const UnderlineInputBorder(borderSide: BorderSide(color: Color(0xFFB8FF00))), // Lime green
               ),
             )
           ],
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text("Dismiss"),
+            onPressed: () {
+              HapticFeedback.heavyImpact();
+              SoundManager.playButtonClick();
+              Navigator.pop(context);
+            },
+            child: Text("DISMISS", style: GoogleFonts.spaceGrotesk(color: const Color(0xFF888888))),
           ),
           ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFB8FF00), // Lime green #B8FF00
+              foregroundColor: Colors.black,
+              shape: const RoundedRectangleBorder(borderRadius: BorderRadius.zero),
+            ),
             onPressed: () async {
+              HapticFeedback.heavyImpact();
+              SoundManager.playButtonClick();
               final name = textController.text.trim();
               if (name.isNotEmpty) {
-                // Capture the ScaffoldMessenger and providers using the dialog context BEFORE popping it
                 final scaffoldMessenger = ScaffoldMessenger.of(context);
                 final syncProvider = Provider.of<SupabaseSyncProvider>(context, listen: false);
                 final trackingProvider = Provider.of<LocationTrackingProvider>(context, listen: false);
@@ -1173,29 +1508,39 @@ class _MapScreenState extends State<MapScreen> {
                 Navigator.pop(context);
 
                 if (syncProvider.currentUserId != null) {
-                  // Online sync claim
                   final res = await syncProvider.attemptClaimLoop(loop.points, name);
                   if (res != null) {
                     scaffoldMessenger.showSnackBar(
-                      SnackBar(content: Text("Loop claimed on backend: $name")),
+                      SnackBar(
+                        backgroundColor: const Color(0xFF141414),
+                        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.zero),
+                        content: Text("LOOP CLAIMED: ${name.toUpperCase()}", style: GoogleFonts.jetBrainsMono(color: const Color(0xFFB8FF00))),
+                      ),
                     );
                     await trackingProvider.loadClaimedLoops();
                   } else {
                     scaffoldMessenger.showSnackBar(
-                      const SnackBar(content: Text("Failed to claim loop on backend. Saved locally.")),
+                      SnackBar(
+                        backgroundColor: const Color(0xFF141414),
+                        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.zero),
+                        content: Text("SYNC FAILED. LOOP SAVED LOCALLY.", style: GoogleFonts.jetBrainsMono(color: const Color(0xFFFF3B3B))),
+                      ),
                     );
                     await trackingProvider.nameLoop(loop.id, name);
                   }
                 } else {
-                  // Offline guest claim
                   await trackingProvider.nameLoop(loop.id, name);
                   scaffoldMessenger.showSnackBar(
-                    SnackBar(content: Text("Loop claimed locally as: $name")),
+                    SnackBar(
+                      backgroundColor: const Color(0xFF141414),
+                      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.zero),
+                      content: Text("LOOP SAVED LOCALLY: ${name.toUpperCase()}", style: GoogleFonts.jetBrainsMono(color: const Color(0xFFB8FF00))),
+                    ),
                   );
                 }
               }
             },
-            child: const Text("Claim"),
+            child: Text("CLAIM", style: GoogleFonts.spaceGrotesk(fontWeight: FontWeight.bold)),
           )
         ],
       ),
@@ -1207,96 +1552,161 @@ class _MapScreenState extends State<MapScreen> {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF1E293B),
+        backgroundColor: const Color(0xFF141414),
+        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.zero),
         title: Text(
           !claim.isActive
-              ? "Expired Claim: ${claim.name} ⏳"
-              : (claim.isMyClaim ? "Claimed Loop: ${claim.name} 🏆" : "Claimed Loop: ${claim.name}"),
-          style: const TextStyle(color: Colors.white),
+              ? "EXPIRED CLAIM: ${claim.name.toUpperCase()}"
+              : "ZONE: ${claim.name.toUpperCase()}",
+          style: GoogleFonts.spaceGrotesk(color: Colors.white, fontWeight: FontWeight.bold),
         ),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             if (!claim.isActive) ...[
-              const Text("This loop is currently unclaimed! ⏳", style: TextStyle(color: Colors.amberAccent, fontSize: 16, fontWeight: FontWeight.bold)),
+              Text(
+                "STATUS: GHOST",
+                style: GoogleFonts.jetBrainsMono(color: const Color(0xFFFF3B3B), fontWeight: FontWeight.bold, fontSize: 13),
+              ),
               const SizedBox(height: 8),
               if (claim.ownerName.isNotEmpty && claim.streakCount > 0)
-                Text("Last Owner: ${claim.ownerName} (Streak: ${claim.streakCount} days)", style: const TextStyle(color: Colors.white70)),
-              const SizedBox(height: 8),
-              const Text("Walk this path and close the loop to claim ownership and start a new streak!", style: TextStyle(color: Colors.white70, fontSize: 13.5)),
+                Text(
+                  "LAST OWNER: ${claim.ownerName.toUpperCase()} · STREAK: ${claim.streakCount} DAYS",
+                  style: GoogleFonts.jetBrainsMono(color: const Color(0xFF888888), fontSize: 11),
+                ),
+              const SizedBox(height: 12),
+              Text(
+                "Walk this block to claim ownership.",
+                style: GoogleFonts.inter(color: const Color(0xFF888888), fontSize: 13),
+              ),
             ] else if (claim.ownerId.isEmpty) ...[
-              const Text("This loop is currently unclaimed! 🟢", style: TextStyle(color: Colors.greenAccent, fontSize: 16, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 8),
-              const Text("Walk this path and close the loop to claim ownership and start your daily streak!", style: TextStyle(color: Colors.white70, fontSize: 13.5)),
+              Text(
+                "STATUS: UNCLAIMED",
+                style: GoogleFonts.jetBrainsMono(color: const Color(0xFFFF6B00), fontWeight: FontWeight.bold, fontSize: 13),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                "Walk this block to claim ownership.",
+                style: GoogleFonts.inter(color: const Color(0xFF888888), fontSize: 13),
+              ),
             ] else if (claim.isMyClaim) ...[
-              Text("🔥 Streak: ${claim.streakCount} days", style: const TextStyle(color: Colors.white70)),
-              Text("🔄 Covered today: ${claim.coveredCountToday} times", style: const TextStyle(color: Colors.white70)),
-              Text("📅 Last covered: ${claim.lastCoveredDate}", style: const TextStyle(color: Colors.white70)),
+              Text(
+                "STATUS: HELD",
+                style: GoogleFonts.jetBrainsMono(color: const Color(0xFFB8FF00), fontWeight: FontWeight.bold, fontSize: 13), // Lime green #B8FF00
+              ),
+              const SizedBox(height: 4),
+              Text(
+                "STREAK: ${claim.streakCount} DAYS\nCOVERED TODAY: ${claim.coveredCountToday} LOOPS\nLAST COVERED: ${claim.lastCoveredDate}",
+                style: GoogleFonts.jetBrainsMono(color: const Color(0xFF888888), fontSize: 11),
+              ),
               const SizedBox(height: 16),
-              const Text("Rename claimed loop:", style: TextStyle(color: Colors.white54, fontSize: 13)),
+              Text(
+                "RENAME ZONE:",
+                style: GoogleFonts.jetBrainsMono(color: const Color(0xFF444444), fontSize: 11),
+              ),
               TextField(
                 controller: textController,
-                style: const TextStyle(color: Colors.white),
+                style: GoogleFonts.spaceGrotesk(color: Colors.white),
                 decoration: const InputDecoration(
-                  enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.white30)),
-                  focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: Color(0xFF2196F3))),
+                  enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Color(0xFF2A2A2A))),
+                  focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: Color(0xFFB8FF00))), // Lime green
                 ),
               )
             ] else ...[
-              Text("Claimed by: ${claim.ownerName.isEmpty ? 'Enemy Player' : claim.ownerName} 👤", style: const TextStyle(color: Colors.white70, fontSize: 16, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 8),
-              Text("🔥 Streak: ${claim.streakCount} days", style: const TextStyle(color: Colors.white70)),
+              Text(
+                "STATUS: CONTESTED",
+                style: GoogleFonts.jetBrainsMono(color: const Color(0xFFFF6B00), fontWeight: FontWeight.bold, fontSize: 13),
+              ),
               const SizedBox(height: 4),
-              Text("📅 Last covered: ${claim.lastCoveredDate}", style: const TextStyle(color: Colors.white70)),
-              const SizedBox(height: 8),
-              const Text("This is competitive territory! Recover this loop to claim it.", style: TextStyle(color: Colors.white38, fontSize: 12)),
+              Text(
+                "OWNER: ${claim.ownerName.toUpperCase()}\nSTREAK: ${claim.streakCount} DAYS\nLAST COVERED: ${claim.lastCoveredDate}",
+                style: GoogleFonts.jetBrainsMono(color: const Color(0xFF888888), fontSize: 11),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                "Complete a loop to contest this territory.",
+                style: GoogleFonts.inter(color: const Color(0xFF888888), fontSize: 13),
+              ),
             ]
           ],
         ),
         actions: [
           if (claim.isMyClaim)
             TextButton(
-              style: TextButton.styleFrom(foregroundColor: Colors.redAccent),
+              style: TextButton.styleFrom(foregroundColor: const Color(0xFFFF3B3B)),
               onPressed: () {
-                // Confirm Abandon
+                HapticFeedback.heavyImpact();
+                SoundManager.playDeleteHistory();
                 showDialog(
                   context: context,
                   builder: (ctx) => AlertDialog(
-                    backgroundColor: const Color(0xFF1E293B),
-                    title: const Text("Abandon Claim?", style: TextStyle(color: Colors.white)),
-                    content: Text("Are you sure you want to abandon the claim on '${claim.name}'? Your streak will be lost.", style: const TextStyle(color: Colors.white70)),
+                    backgroundColor: const Color(0xFF141414),
+                    shape: const RoundedRectangleBorder(borderRadius: BorderRadius.zero),
+                    title: Text(
+                      "ABANDON CLAIM?",
+                      style: GoogleFonts.spaceGrotesk(color: Colors.white, fontWeight: FontWeight.bold),
+                    ),
+                    content: Text(
+                      "ARE YOU SURE YOU WANT TO ABANDON YOUR STREAK ON '${claim.name.toUpperCase()}'?",
+                      style: GoogleFonts.jetBrainsMono(color: const Color(0xFF888888), fontSize: 11),
+                    ),
                     actions: [
-                      TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cancel")),
-                      ElevatedButton(
-                        style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+                      TextButton(
                         onPressed: () {
-                          Provider.of<LocationTrackingProvider>(context, listen: false).abandonClaim(claim.id);
-                          Navigator.pop(ctx); // Close confirmation
-                          Navigator.pop(context); // Close detail dialog
+                          HapticFeedback.heavyImpact();
+                          SoundManager.playButtonClick();
+                          Navigator.pop(ctx);
                         },
-                        child: const Text("Yes, Abandon"),
+                        child: Text("CANCEL", style: GoogleFonts.spaceGrotesk(color: const Color(0xFF888888))),
+                      ),
+                      ElevatedButton(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.transparent,
+                          foregroundColor: const Color(0xFFFF3B3B),
+                          side: const BorderSide(color: Color(0xFFFF3B3B)),
+                          shape: const RoundedRectangleBorder(borderRadius: BorderRadius.zero),
+                        ),
+                        onPressed: () {
+                          HapticFeedback.heavyImpact();
+                          SoundManager.playDeleteHistory();
+                          Provider.of<LocationTrackingProvider>(context, listen: false).abandonClaim(claim.id);
+                          Navigator.pop(ctx);
+                          Navigator.pop(context);
+                        },
+                        child: Text("ABANDON", style: GoogleFonts.spaceGrotesk(fontWeight: FontWeight.bold)),
                       )
                     ],
                   ),
                 );
               },
-              child: const Text("Abandon Claim"),
+              child: Text("ABANDON", style: GoogleFonts.spaceGrotesk(fontWeight: FontWeight.bold)),
             ),
           TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text("Close"),
+            onPressed: () {
+              HapticFeedback.heavyImpact();
+              SoundManager.playButtonClick();
+              Navigator.pop(context);
+            },
+            child: Text("CLOSE", style: GoogleFonts.spaceGrotesk(color: const Color(0xFF888888))),
           ),
           if (claim.isMyClaim && claim.isActive)
             ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFB8FF00), // Lime green #B8FF00
+                foregroundColor: Colors.black,
+                shape: const RoundedRectangleBorder(borderRadius: BorderRadius.zero),
+              ),
               onPressed: () {
+                HapticFeedback.heavyImpact();
+                SoundManager.playButtonClick();
                 final newName = textController.text.trim();
                 if (newName.isNotEmpty) {
                   Provider.of<LocationTrackingProvider>(context, listen: false).nameLoop(claim.id, newName);
                   Navigator.pop(context);
                 }
               },
-              child: const Text("Save"),
+              child: Text("SAVE", style: GoogleFonts.spaceGrotesk(fontWeight: FontWeight.bold)),
             )
         ],
       ),
@@ -1324,7 +1734,128 @@ class _MapScreenState extends State<MapScreen> {
         bestPoint = p;
       }
     }
-    // Place card marker approx 13 metres north of the northernmost boundary point
     return LatLng(bestPoint.latitude + 0.00012, bestPoint.longitude);
   }
+
+  LatLngBounds _getBounds(List<LatLng> points) {
+    double minLat = points.first.latitude;
+    double maxLat = points.first.latitude;
+    double minLng = points.first.longitude;
+    double maxLng = points.first.longitude;
+    for (final point in points) {
+      if (point.latitude < minLat) minLat = point.latitude;
+      if (point.latitude > maxLat) maxLat = point.latitude;
+      if (point.longitude < minLng) minLng = point.longitude;
+      if (point.longitude > maxLng) maxLng = point.longitude;
+    }
+    return LatLngBounds(
+      southwest: LatLng(minLat, minLng),
+      northeast: LatLng(maxLat, maxLng),
+    );
+  }
+}
+
+// ----------------------------------------------------
+// CRT SCANLINE BUTTON WIDGETS
+// ----------------------------------------------------
+
+class CrtStartWalkButton extends StatefulWidget {
+  final VoidCallback onPressed;
+
+  const CrtStartWalkButton({super.key, required this.onPressed});
+
+  @override
+  State<CrtStartWalkButton> createState() => _CrtStartWalkButtonState();
+}
+
+class _CrtStartWalkButtonState extends State<CrtStartWalkButton> with SingleTickerProviderStateMixin {
+  late AnimationController _crtController;
+
+  @override
+  void initState() {
+    super.initState();
+    _crtController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 2),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _crtController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: widget.onPressed,
+      child: Container(
+        height: 52,
+        decoration: BoxDecoration(
+          color: const Color(0xFFB8FF00), // Lime green #B8FF00 background
+          borderRadius: BorderRadius.zero,
+          boxShadow: [
+            BoxShadow(
+              color: const Color(0xFFB8FF00).withOpacity(0.4),
+              blurRadius: 12,
+              spreadRadius: 1,
+            )
+          ],
+        ),
+        child: Stack(
+          children: [
+            // Animating CRT Scanlines
+            Positioned.fill(
+              child: AnimatedBuilder(
+                animation: _crtController,
+                builder: (context, _) {
+                  return CustomPaint(
+                    painter: ScanlinePainter(_crtController.value),
+                  );
+                },
+              ),
+            ),
+            
+            // Text Label
+            Center(
+              child: Text(
+                "START CLAIM WALK",
+                style: GoogleFonts.spaceGrotesk(
+                  color: Colors.black,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 16 * 0.04,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class ScanlinePainter extends CustomPainter {
+  final double animationValue;
+
+  ScanlinePainter(this.animationValue);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = Colors.black.withOpacity(0.12)
+      ..strokeWidth = 1.0;
+
+    const double step = 4.0; // Distance between scanlines
+    final double offset = (animationValue * step);
+
+    for (double y = offset; y < size.height; y += step) {
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(ScanlinePainter oldDelegate) =>
+      oldDelegate.animationValue != animationValue;
 }

@@ -76,14 +76,14 @@ class TurfApp extends StatelessWidget {
         theme: ThemeData(
           useMaterial3: true,
           brightness: Brightness.dark,
-          primaryColor: const Color(0xFF2196F3), // Vibrant blue
-          scaffoldBackgroundColor: const Color(0xFF0F172A), // Deep Slate dark
-          cardColor: const Color(0xFF1E293B), // Slate card bg
+          primaryColor: const Color(0xFFB8FF00), // Lime green primary
+          scaffoldBackgroundColor: const Color(0xFF0A0A0A), // Near-black bg
+          cardColor: const Color(0xFF141414), // Dark surface
           colorScheme: const ColorScheme.dark(
-            primary: Color(0xFF2196F3),
-            secondary: Color(0xFF4CAF50),
-            surface: Color(0xFF1E293B),
-            background: const Color(0xFF0F172A),
+            primary: Color(0xFFB8FF00),
+            secondary: Color(0xFFB8FF00),
+            surface: Color(0xFF141414),
+            background: Color(0xFF0A0A0A),
           ),
           textTheme: const TextTheme(
             titleLarge: TextStyle(
