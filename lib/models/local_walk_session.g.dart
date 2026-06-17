@@ -81,6 +81,11 @@ const LocalWalkSessionSchema = CollectionSchema(
       id: 12,
       name: r'trailLngList',
       type: IsarType.doubleList,
+    ),
+    r'userId': PropertySchema(
+      id: 13,
+      name: r'userId',
+      type: IsarType.string,
     )
   },
   estimateSize: _localWalkSessionEstimateSize,
@@ -122,6 +127,7 @@ int _localWalkSessionEstimateSize(
   bytesCount += 3 + object.sessionId.length * 3;
   bytesCount += 3 + object.trailLatList.length * 8;
   bytesCount += 3 + object.trailLngList.length * 8;
+  bytesCount += 3 + object.userId.length * 3;
   return bytesCount;
 }
 
@@ -144,6 +150,7 @@ void _localWalkSessionSerialize(
   writer.writeLong(offsets[10], object.steps);
   writer.writeDoubleList(offsets[11], object.trailLatList);
   writer.writeDoubleList(offsets[12], object.trailLngList);
+  writer.writeString(offsets[13], object.userId);
 }
 
 LocalWalkSession _localWalkSessionDeserialize(
@@ -167,6 +174,7 @@ LocalWalkSession _localWalkSessionDeserialize(
   object.steps = reader.readLong(offsets[10]);
   object.trailLatList = reader.readDoubleList(offsets[11]) ?? [];
   object.trailLngList = reader.readDoubleList(offsets[12]) ?? [];
+  object.userId = reader.readString(offsets[13]);
   return object;
 }
 
@@ -203,6 +211,8 @@ P _localWalkSessionDeserializeProp<P>(
       return (reader.readDoubleList(offset) ?? []) as P;
     case 12:
       return (reader.readDoubleList(offset) ?? []) as P;
+    case 13:
+      return (reader.readString(offset)) as P;
     default:
       throw IsarError('Unknown property with id $propertyId');
   }
@@ -1552,6 +1562,142 @@ extension LocalWalkSessionQueryFilter
       );
     });
   }
+
+  QueryBuilder<LocalWalkSession, LocalWalkSession, QAfterFilterCondition>
+      userIdEqualTo(
+    String value, {
+    bool caseSensitive = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.equalTo(
+        property: r'userId',
+        value: value,
+        caseSensitive: caseSensitive,
+      ));
+    });
+  }
+
+  QueryBuilder<LocalWalkSession, LocalWalkSession, QAfterFilterCondition>
+      userIdGreaterThan(
+    String value, {
+    bool include = false,
+    bool caseSensitive = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.greaterThan(
+        include: include,
+        property: r'userId',
+        value: value,
+        caseSensitive: caseSensitive,
+      ));
+    });
+  }
+
+  QueryBuilder<LocalWalkSession, LocalWalkSession, QAfterFilterCondition>
+      userIdLessThan(
+    String value, {
+    bool include = false,
+    bool caseSensitive = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.lessThan(
+        include: include,
+        property: r'userId',
+        value: value,
+        caseSensitive: caseSensitive,
+      ));
+    });
+  }
+
+  QueryBuilder<LocalWalkSession, LocalWalkSession, QAfterFilterCondition>
+      userIdBetween(
+    String lower,
+    String upper, {
+    bool includeLower = true,
+    bool includeUpper = true,
+    bool caseSensitive = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.between(
+        property: r'userId',
+        lower: lower,
+        includeLower: includeLower,
+        upper: upper,
+        includeUpper: includeUpper,
+        caseSensitive: caseSensitive,
+      ));
+    });
+  }
+
+  QueryBuilder<LocalWalkSession, LocalWalkSession, QAfterFilterCondition>
+      userIdStartsWith(
+    String value, {
+    bool caseSensitive = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.startsWith(
+        property: r'userId',
+        value: value,
+        caseSensitive: caseSensitive,
+      ));
+    });
+  }
+
+  QueryBuilder<LocalWalkSession, LocalWalkSession, QAfterFilterCondition>
+      userIdEndsWith(
+    String value, {
+    bool caseSensitive = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.endsWith(
+        property: r'userId',
+        value: value,
+        caseSensitive: caseSensitive,
+      ));
+    });
+  }
+
+  QueryBuilder<LocalWalkSession, LocalWalkSession, QAfterFilterCondition>
+      userIdContains(String value, {bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.contains(
+        property: r'userId',
+        value: value,
+        caseSensitive: caseSensitive,
+      ));
+    });
+  }
+
+  QueryBuilder<LocalWalkSession, LocalWalkSession, QAfterFilterCondition>
+      userIdMatches(String pattern, {bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.matches(
+        property: r'userId',
+        wildcard: pattern,
+        caseSensitive: caseSensitive,
+      ));
+    });
+  }
+
+  QueryBuilder<LocalWalkSession, LocalWalkSession, QAfterFilterCondition>
+      userIdIsEmpty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.equalTo(
+        property: r'userId',
+        value: '',
+      ));
+    });
+  }
+
+  QueryBuilder<LocalWalkSession, LocalWalkSession, QAfterFilterCondition>
+      userIdIsNotEmpty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.greaterThan(
+        property: r'userId',
+        value: '',
+      ));
+    });
+  }
 }
 
 extension LocalWalkSessionQueryObject
@@ -1712,6 +1858,20 @@ extension LocalWalkSessionQuerySortBy
       sortByStepsDesc() {
     return QueryBuilder.apply(this, (query) {
       return query.addSortBy(r'steps', Sort.desc);
+    });
+  }
+
+  QueryBuilder<LocalWalkSession, LocalWalkSession, QAfterSortBy>
+      sortByUserId() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'userId', Sort.asc);
+    });
+  }
+
+  QueryBuilder<LocalWalkSession, LocalWalkSession, QAfterSortBy>
+      sortByUserIdDesc() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'userId', Sort.desc);
     });
   }
 }
@@ -1883,6 +2043,20 @@ extension LocalWalkSessionQuerySortThenBy
       return query.addSortBy(r'steps', Sort.desc);
     });
   }
+
+  QueryBuilder<LocalWalkSession, LocalWalkSession, QAfterSortBy>
+      thenByUserId() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'userId', Sort.asc);
+    });
+  }
+
+  QueryBuilder<LocalWalkSession, LocalWalkSession, QAfterSortBy>
+      thenByUserIdDesc() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'userId', Sort.desc);
+    });
+  }
 }
 
 extension LocalWalkSessionQueryWhereDistinct
@@ -1977,6 +2151,13 @@ extension LocalWalkSessionQueryWhereDistinct
       return query.addDistinctBy(r'trailLngList');
     });
   }
+
+  QueryBuilder<LocalWalkSession, LocalWalkSession, QDistinct> distinctByUserId(
+      {bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addDistinctBy(r'userId', caseSensitive: caseSensitive);
+    });
+  }
 }
 
 extension LocalWalkSessionQueryProperty
@@ -2068,6 +2249,12 @@ extension LocalWalkSessionQueryProperty
       trailLngListProperty() {
     return QueryBuilder.apply(this, (query) {
       return query.addPropertyName(r'trailLngList');
+    });
+  }
+
+  QueryBuilder<LocalWalkSession, String, QQueryOperations> userIdProperty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addPropertyName(r'userId');
     });
   }
 }

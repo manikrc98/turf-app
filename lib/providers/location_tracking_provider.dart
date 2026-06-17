@@ -77,7 +77,8 @@ class LocationTrackingProvider extends ChangeNotifier {
   }
 
   Future<void> _loadClaimedLoops() async {
-    _cachedClaimedLoops = await _claimedLoopRepo.getClaimedLoops();
+    final uid = Supabase.instance.client.auth.currentUser?.id ?? "guest_user";
+    _cachedClaimedLoops = await _claimedLoopRepo.getClaimedLoops(uid);
     notifyListeners();
   }
 
@@ -88,6 +89,10 @@ class LocationTrackingProvider extends ChangeNotifier {
       final activeWalk = await isar.localWalkSessions.get(99999);
 
       if (activeWalk != null) {
+        final uid = Supabase.instance.client.auth.currentUser?.id ?? "guest_user";
+        if (activeWalk.userId != uid) {
+          return;
+        }
         _trailPoints = [];
         for (int i = 0; i < activeWalk.trailLatList.length; i++) {
           _trailPoints.add(LatLng(activeWalk.trailLatList[i], activeWalk.trailLngList[i]));
@@ -219,6 +224,7 @@ class LocationTrackingProvider extends ChangeNotifier {
     final activeWalk = LocalWalkSession()
       ..id = 99999
       ..sessionId = "active_session"
+      ..userId = Supabase.instance.client.auth.currentUser?.id ?? "guest_user"
       ..dateTime = DateTime.now().toIso8601String()
       ..steps = 0
       ..isStepEstimated = false
@@ -293,7 +299,8 @@ class LocationTrackingProvider extends ChangeNotifier {
     );
 
     // Save walk summary to local repository
-    await _historyRepo.addSession(summary);
+    final uid = Supabase.instance.client.auth.currentUser?.id ?? "guest_user";
+    await _historyRepo.addSession(summary, uid);
 
     // Clean up active session record from Isar
     try {
@@ -354,10 +361,23 @@ class LocationTrackingProvider extends ChangeNotifier {
     final targetId = newLoopId ?? loopId;
     final existingClaimIndex = _cachedClaimedLoops.indexWhere((l) => l.id == targetId);
     final today = ClaimedLoopRepository.getTodayDateString();
+    final uid = Supabase.instance.client.auth.currentUser?.id ?? "guest_user";
+
+    // Sync name change to Supabase if online
+    bool synced = false;
+    try {
+      final client = Supabase.instance.client;
+      if (client.auth.currentSession != null) {
+        await client.from('loops').update({'name': name}).eq('id', targetId);
+        synced = true;
+      }
+    } catch (e) {
+      print("Failed to sync loop rename to Supabase: $e");
+    }
 
     if (existingClaimIndex != -1) {
       final updatedClaim = _cachedClaimedLoops[existingClaimIndex].copyWith(name: name);
-      await _claimedLoopRepo.addOrUpdateClaimedLoop(updatedClaim);
+      await _claimedLoopRepo.addOrUpdateClaimedLoop(updatedClaim, uid, isSynced: synced);
     } else {
       final loop = _capturedLoops.firstWhere((l) => l.id == targetId);
       final newClaim = ClaimedLoop(
@@ -368,17 +388,7 @@ class LocationTrackingProvider extends ChangeNotifier {
         lastCoveredDate: today,
         coveredCountToday: 1,
       );
-      await _claimedLoopRepo.addOrUpdateClaimedLoop(newClaim);
-    }
-
-    // Sync name change to Supabase if online
-    try {
-      final client = Supabase.instance.client;
-      if (client.auth.currentSession != null) {
-        await client.from('loops').update({'name': name}).eq('id', targetId);
-      }
-    } catch (e) {
-      print("Failed to sync loop rename to Supabase: $e");
+      await _claimedLoopRepo.addOrUpdateClaimedLoop(newClaim, uid, isSynced: synced);
     }
 
     await _loadClaimedLoops();
@@ -386,7 +396,8 @@ class LocationTrackingProvider extends ChangeNotifier {
 
   /// Abandon a claimed loop
   Future<void> abandonClaim(String loopId) async {
-    await _claimedLoopRepo.deleteClaim(loopId);
+    final uid = Supabase.instance.client.auth.currentUser?.id ?? "guest_user";
+    await _claimedLoopRepo.deleteClaim(loopId, uid);
 
     // Sync claim deletion to Supabase if online
     try {

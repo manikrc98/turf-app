@@ -8,6 +8,7 @@ import '../models/walk_session_summary.dart';
 import '../models/local_walk_session.dart';
 import '../models/turf_loop.dart';
 import 'isar_service.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 class HistoryRepository {
   
@@ -44,9 +45,10 @@ class HistoryRepository {
   }
 
   /// Converts a UI WalkSessionSummary to Isar LocalWalkSession
-  LocalWalkSession _toLocal(WalkSessionSummary summary) {
+  LocalWalkSession _toLocal(WalkSessionSummary summary, String userId) {
     final local = LocalWalkSession()
       ..sessionId = summary.id
+      ..userId = userId
       ..dateTime = summary.dateTime
       ..steps = summary.steps
       ..isStepEstimated = summary.isStepEstimated
@@ -63,7 +65,7 @@ class HistoryRepository {
   }
 
   /// Migrate old JSON data to Isar if it exists
-  Future<void> _migrateJsonToIsar(Isar isar) async {
+  Future<void> _migrateJsonToIsar(Isar isar, String currentUserId) async {
     try {
       final docsDir = await getApplicationDocumentsDirectory();
       final docsFile = File('${docsDir.path}/walk_history.json');
@@ -73,7 +75,7 @@ class HistoryRepository {
         final List<dynamic> jsonList = jsonDecode(jsonStr);
         final List<WalkSessionSummary> oldHistory = jsonList.map((item) => WalkSessionSummary.fromJson(item)).toList();
         
-        final List<LocalWalkSession> localHistory = oldHistory.map((s) => _toLocal(s)).toList();
+        final List<LocalWalkSession> localHistory = oldHistory.map((s) => _toLocal(s, currentUserId)).toList();
         
         await isar.writeTxn(() async {
           await isar.localWalkSessions.putAll(localHistory);
@@ -89,13 +91,16 @@ class HistoryRepository {
   }
 
   /// Get walk sessions list from local storage, in reverse chronological order
-  Future<List<WalkSessionSummary>> getHistory() async {
+  Future<List<WalkSessionSummary>> getHistory(String currentUserId) async {
     try {
       final isar = await IsarService.getDB();
-      await _migrateJsonToIsar(isar);
+      await _migrateJsonToIsar(isar, currentUserId);
 
-      // Query sessions from database sorted by id (chronological order)
-      final localSessions = await isar.localWalkSessions.where().findAll();
+      // Query sessions from database filtered by user ID
+      final localSessions = await isar.localWalkSessions
+          .filter()
+          .userIdEqualTo(currentUserId)
+          .findAll();
       final history = localSessions.map((s) => _toSummary(s)).toList();
       
       // Return reversed list to match Kotlin's historyList.reversed() (reverse chronological)
@@ -107,11 +112,11 @@ class HistoryRepository {
   }
 
   /// Add a new walk session to history
-  Future<void> addSession(WalkSessionSummary session) async {
+  Future<void> addSession(WalkSessionSummary session, String currentUserId) async {
     try {
       final isar = await IsarService.getDB();
       
-      final localSession = _toLocal(session);
+      final localSession = _toLocal(session, currentUserId);
       await isar.writeTxn(() async {
         await isar.localWalkSessions.put(localSession);
       });
@@ -121,12 +126,23 @@ class HistoryRepository {
   }
 
   /// Clear session history
-  Future<void> clearHistory() async {
+  Future<void> clearHistory(String currentUserId) async {
     try {
       final isar = await IsarService.getDB();
       await isar.writeTxn(() async {
-        await isar.localWalkSessions.clear();
+        await isar.localWalkSessions.filter().userIdEqualTo(currentUserId).deleteAll();
       });
+
+      // Clear remote walk sessions in Supabase for the current user
+      try {
+        final client = Supabase.instance.client;
+        final user = client.auth.currentUser;
+        if (user != null && user.id == currentUserId) {
+          await client.from('walk_sessions').delete().eq('user_id', user.id);
+        }
+      } catch (e) {
+        print("Failed to clear remote walk history from Supabase: $e");
+      }
     } catch (e) {
       print("Error clearing walk history in Isar: $e");
     }
@@ -141,6 +157,16 @@ class HistoryRepository {
         await isar.writeTxn(() async {
           await isar.localWalkSessions.delete(existing.id);
         });
+      }
+
+      // Try deleting from remote Supabase if online
+      try {
+        final client = Supabase.instance.client;
+        if (client.auth.currentSession != null) {
+          await client.from('walk_sessions').delete().eq('id', sessionId);
+        }
+      } catch (e) {
+        print("Failed to delete walk session from Supabase: $e");
       }
     } catch (e) {
       print("Error deleting walk session in Isar: $e");

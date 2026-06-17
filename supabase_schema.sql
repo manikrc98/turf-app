@@ -84,6 +84,8 @@ CREATE TABLE IF NOT EXISTS public.walk_sessions (
     cadence INTEGER DEFAULT 0 NOT NULL,
     elevation_gain_metres DOUBLE PRECISION DEFAULT 0.0 NOT NULL,
     geom GEOMETRY(LineString, 4326), -- Live path trace
+    loop_count INTEGER DEFAULT 0,
+    loops_json TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
 );
 
@@ -95,6 +97,8 @@ DROP POLICY IF EXISTS "Allow users to view own walk sessions" ON public.walk_ses
 CREATE POLICY "Allow users to view own walk sessions" ON public.walk_sessions FOR SELECT USING (auth.uid() = user_id);
 DROP POLICY IF EXISTS "Allow users to insert own walk sessions" ON public.walk_sessions;
 CREATE POLICY "Allow users to insert own walk sessions" ON public.walk_sessions FOR INSERT WITH CHECK (auth.uid() = user_id);
+DROP POLICY IF EXISTS "Allow users to delete own walk sessions" ON public.walk_sessions;
+CREATE POLICY "Allow users to delete own walk sessions" ON public.walk_sessions FOR DELETE USING (auth.uid() = user_id);
 
 
 -- Core RPC Function: claim_loop_attempt
@@ -181,6 +185,8 @@ BEGIN
                 -- Same owner: Increment counts
                 IF v_claim_last_date = CURRENT_DATE THEN
                     v_claim_covered_today := v_claim_covered_today + 1;
+                    -- Restore shield streak by 1 on repeated walks
+                    v_claim_streak := v_claim_streak + 1;
                 ELSIF v_claim_last_date = (CURRENT_DATE - INTERVAL '1 day')::DATE THEN
                     v_claim_streak := v_claim_streak + 1;
                     v_claim_last_date := CURRENT_DATE;
@@ -212,8 +218,28 @@ BEGIN
                     
                     v_status := 'takeover';
                 ELSE
-                    -- Owner's streak is active: Challenge increments internally but owner doesn't change
-                    v_status := 'challenged';
+                    -- Owner's streak is active: Challenger chips away 1 streak point (Shield HP Decay)
+                    v_claim_streak := v_claim_streak - 1;
+                    
+                    IF v_claim_streak <= 0 THEN
+                        -- Shield broken: Takeover!
+                        UPDATE public.claims_all 
+                        SET user_id = p_user_id,
+                            streak_count = 1,
+                            last_covered_date = CURRENT_DATE,
+                            covered_count_today = 1,
+                            claimed_at = now()
+                        WHERE loop_id = v_matched_loop_id;
+                        
+                        v_status := 'takeover';
+                    ELSE
+                        -- Shield damaged but still holding
+                        UPDATE public.claims_all 
+                        SET streak_count = v_claim_streak
+                        WHERE loop_id = v_matched_loop_id;
+                        
+                        v_status := 'challenged';
+                    END IF;
                 END IF;
             END IF;
         ELSE

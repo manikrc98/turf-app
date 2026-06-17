@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
@@ -11,6 +12,7 @@ import '../constants/auth_constants.dart';
 import '../models/claimed_loop.dart';
 import '../models/walk_session_summary.dart';
 import '../models/local_walk_session.dart';
+import '../models/local_claimed_loop.dart';
 import '../repositories/claimed_loop_repository.dart';
 import '../repositories/isar_service.dart';
 
@@ -63,14 +65,13 @@ class SupabaseSyncProvider extends ChangeNotifier {
 
       var session = client.auth.currentSession;
       
-      // Clear any historical anonymous guest session, forcing real Google auth
-      if (session != null && session.user != null) {
-        final isAnonymous = session.user.appMetadata['provider'] == 'anonymous' || 
-            (session.user.email == null || session.user.email!.isEmpty);
-            
-        if (isAnonymous) {
-          await client.auth.signOut();
-          session = null;
+      // If no session exists, sign in anonymously to establish guest mode
+      if (session == null) {
+        try {
+          final res = await client.auth.signInAnonymously();
+          session = res.session;
+        } catch (e) {
+          print("Failed to sign in anonymously: $e");
         }
       }
 
@@ -100,9 +101,13 @@ class SupabaseSyncProvider extends ChangeNotifier {
       _isSyncing = false;
       notifyListeners();
 
-      // Pull latest claims from Supabase
-      await pullClaims();
-      await syncUnsyncedWalkSessions();
+      // Pull latest claims and history from Supabase if online
+      if (_currentUserId != null) {
+        await pullClaims();
+        await pullHistory();
+        await syncUnsyncedWalkSessions();
+        await syncUnsyncedClaims();
+      }
     } catch (e) {
       print("Supabase Initialize & Auth error: $e");
       _initialized = true;
@@ -196,12 +201,97 @@ class SupabaseSyncProvider extends ChangeNotifier {
       }
 
       // Save to local Isar DB
-      await _claimedLoopRepo.saveClaimedLoops(globalClaimsList);
+      await _claimedLoopRepo.saveClaimedLoops(globalClaimsList, _currentUserId!);
 
       _isSyncing = false;
       notifyListeners();
     } catch (e) {
       print("Supabase pullClaims error: $e");
+      _isSyncing = false;
+      notifyListeners();
+    }
+  }
+
+  /// Pull all walk sessions from Supabase and save them to local Isar DB
+  Future<void> pullHistory() async {
+    if (_currentUserId == null) return;
+
+    try {
+      _isSyncing = true;
+      notifyListeners();
+
+      final client = Supabase.instance.client;
+      final response = await client
+          .from('walk_sessions')
+          .select('*')
+          .order('created_at', ascending: true);
+
+      final List<LocalWalkSession> localSessions = [];
+
+      for (var row in response) {
+        final String sessionId = row['id'] as String;
+        final int steps = (row['steps'] as int?) ?? 0;
+        final double distanceKm = (row['distance_km'] as num?)?.toDouble() ?? 0.0;
+        final int durationSeconds = (row['duration_seconds'] as int?) ?? 0;
+        final int cadence = (row['cadence'] as int?) ?? 0;
+        final double elevationGainMetres = (row['elevation_gain_metres'] as num?)?.toDouble() ?? 0.0;
+        final String createdAt = row['created_at'] as String;
+        final dynamic geomData = row['geom'];
+
+        final List<LatLng> points = parseGeometry(geomData);
+        final List<double> trailLatList = points.map((p) => p.latitude).toList();
+        final List<double> trailLngList = points.map((p) => p.longitude).toList();
+        final int loopCount = (row['loop_count'] as int?) ?? 0;
+        final String loopsJson = row['loops_json'] as String? ?? "";
+
+        final local = LocalWalkSession()
+          ..sessionId = sessionId
+          ..userId = _currentUserId!
+          ..dateTime = formatDateTimeString(createdAt)
+          ..steps = steps
+          ..isStepEstimated = false
+          ..distanceKm = distanceKm
+          ..loopCount = loopCount
+          ..durationSeconds = durationSeconds
+          ..cadence = cadence
+          ..elevationGainMetres = elevationGainMetres
+          ..trailLatList = trailLatList
+          ..trailLngList = trailLngList
+          ..loopsJson = loopsJson
+          ..isSynced = true;
+
+        localSessions.add(local);
+      }
+
+      // Save to local Isar DB
+      final isar = await IsarService.getDB();
+      await isar.writeTxn(() async {
+        // Query unsynced walk sessions for this user to preserve them
+        final unsynced = await isar.localWalkSessions
+            .filter()
+            .userIdEqualTo(_currentUserId!)
+            .isSyncedEqualTo(false)
+            .findAll();
+
+        // Clear existing local walk sessions for this user (except active walk)
+        final activeWalk = await isar.localWalkSessions.get(99999);
+        await isar.localWalkSessions.filter().userIdEqualTo(_currentUserId!).deleteAll();
+        
+        if (activeWalk != null) {
+          await isar.localWalkSessions.put(activeWalk);
+        }
+        if (unsynced.isNotEmpty) {
+          await isar.localWalkSessions.putAll(unsynced);
+        }
+        if (localSessions.isNotEmpty) {
+          await isar.localWalkSessions.putAll(localSessions);
+        }
+      });
+
+      _isSyncing = false;
+      notifyListeners();
+    } catch (e) {
+      print("Supabase pullHistory error: $e");
       _isSyncing = false;
       notifyListeners();
     }
@@ -269,6 +359,8 @@ class SupabaseSyncProvider extends ChangeNotifier {
         'cadence': summary.cadence,
         'elevation_gain_metres': summary.elevationGainMetres,
         'geom': geomWkt,
+        'loop_count': summary.loopCount,
+        'loops_json': jsonEncode(summary.loops.map((l) => l.toJson()).toList()),
         'created_at': DateTime.now().toIso8601String(),
       });
     } catch (e) {
@@ -296,6 +388,9 @@ class SupabaseSyncProvider extends ChangeNotifier {
   static List<LatLng> parseGeometry(dynamic geom) {
     if (geom == null) return [];
     if (geom is String) {
+      if (geom.toUpperCase().startsWith("LINESTRING")) {
+        return parseWktLineString(geom);
+      }
       return parseWktPolygon(geom);
     }
     if (geom is Map) {
@@ -315,12 +410,67 @@ class SupabaseSyncProvider extends ChangeNotifier {
             }
             return points;
           }
+        } else if (type == 'LineString') {
+          final coords = geom['coordinates'] as List<dynamic>?;
+          if (coords != null) {
+            final List<LatLng> points = [];
+            for (var pt in coords) {
+              if (pt is List<dynamic> && pt.length >= 2) {
+                final double lng = (pt[0] as num).toDouble();
+                final double lat = (pt[1] as num).toDouble();
+                points.add(LatLng(lat, lng));
+              }
+            }
+            return points;
+          }
         }
       } catch (e) {
-        print("Failed parsing GeoJSON polygon: $e");
+        print("Failed parsing GeoJSON geometry: $e");
       }
     }
     return [];
+  }
+
+  /// Parses a WKT LINESTRING string into List<LatLng>
+  static List<LatLng> parseWktLineString(String wkt) {
+    try {
+      // e.g. "LINESTRING(lng1 lat1, lng2 lat2, ...)"
+      String clean = wkt.toUpperCase().replaceFirst("LINESTRING", "").trim();
+      clean = clean.replaceAll("(", "").replaceAll(")", "");
+      
+      final List<String> coordStrings = clean.split(",");
+      final List<LatLng> points = [];
+      
+      for (var coordStr in coordStrings) {
+        final parts = coordStr.trim().split(" ");
+        if (parts.length >= 2) {
+          final double lng = double.parse(parts[0]);
+          final double lat = double.parse(parts[1]);
+          points.add(LatLng(lat, lng));
+        }
+      }
+      
+      return points;
+    } catch (e) {
+      print("Failed parsing WKT linestring: $e");
+      return [];
+    }
+  }
+
+  /// Format an ISO date-time string (or fallback) to user-friendly walk session display string.
+  static String formatDateTimeString(String dateStr) {
+    try {
+      final parsed = DateTime.parse(dateStr);
+      final months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      final mStr = months[parsed.month - 1];
+      final dStr = parsed.day.toString().padLeft(2, '0');
+      final yStr = parsed.year.toString();
+      final hStr = parsed.hour.toString().padLeft(2, '0');
+      final minStr = parsed.minute.toString().padLeft(2, '0');
+      return '$mStr $dStr, $yStr $hStr:$minStr';
+    } catch (_) {
+      return dateStr;
+    }
   }
 
   /// Parses a WKT POLYGON string into List<LatLng>
@@ -424,6 +574,7 @@ class SupabaseSyncProvider extends ChangeNotifier {
       notifyListeners();
 
       await pullClaims();
+      await pullHistory();
       await syncUnsyncedWalkSessions();
       return true;
     } catch (e) {
@@ -434,7 +585,7 @@ class SupabaseSyncProvider extends ChangeNotifier {
     }
   }
 
-  /// Trigger anonymous data linking RPC
+  /// Trigger anonymous data linking RPC and migrate local Isar cache
   Future<void> linkAnonymousData(String oldUserId) async {
     try {
       final client = Supabase.instance.client;
@@ -442,6 +593,31 @@ class SupabaseSyncProvider extends ChangeNotifier {
         'p_old_user_id': oldUserId,
       });
       print("Successfully linked anonymous user data to new account.");
+
+      // Migrate local Isar records from oldUserId to _currentUserId
+      if (_currentUserId != null) {
+        final isar = await IsarService.getDB();
+        await isar.writeTxn(() async {
+          // Migrate walk sessions
+          final localWalks = await isar.localWalkSessions.filter().userIdEqualTo(oldUserId).findAll();
+          for (var walk in localWalks) {
+            walk.userId = _currentUserId!;
+          }
+          if (localWalks.isNotEmpty) {
+            await isar.localWalkSessions.putAll(localWalks);
+          }
+
+          // Migrate claimed loops
+          final localClaims = await isar.localClaimedLoops.filter().userIdEqualTo(oldUserId).findAll();
+          for (var claim in localClaims) {
+            claim.userId = _currentUserId!;
+          }
+          if (localClaims.isNotEmpty) {
+            await isar.localClaimedLoops.putAll(localClaims);
+          }
+        });
+        print("Successfully migrated local Isar cached data to new user ID.");
+      }
     } catch (e) {
       print("Failed to link anonymous data: $e");
     }
@@ -459,8 +635,18 @@ class SupabaseSyncProvider extends ChangeNotifier {
         await GoogleSignIn().signOut();
       } catch (_) {}
 
-      // Clear local claims from Isar
-      await _claimedLoopRepo.saveClaimedLoops([]);
+      // Clear local claims from Isar for the current user
+      if (_currentUserId != null) {
+        await _claimedLoopRepo.saveClaimedLoops([], _currentUserId!);
+      }
+
+      // Clear local walk sessions from Isar for the current user
+      final isar = await IsarService.getDB();
+      await isar.writeTxn(() async {
+        if (_currentUserId != null) {
+          await isar.localWalkSessions.filter().userIdEqualTo(_currentUserId!).deleteAll();
+        }
+      });
 
       _currentUserId = null;
       _currentUsername = null;
@@ -482,7 +668,11 @@ class SupabaseSyncProvider extends ChangeNotifier {
     if (_currentUserId == null) return;
     try {
       final isar = await IsarService.getDB();
-      final unsynced = await isar.localWalkSessions.filter().isSyncedEqualTo(false).findAll();
+      final unsynced = await isar.localWalkSessions
+          .filter()
+          .userIdEqualTo(_currentUserId!)
+          .isSyncedEqualTo(false)
+          .findAll();
       
       if (unsynced.isEmpty) return;
       
@@ -508,6 +698,8 @@ class SupabaseSyncProvider extends ChangeNotifier {
           'cadence': session.cadence,
           'elevation_gain_metres': session.elevationGainMetres,
           'geom': geomWkt,
+          'loop_count': session.loopCount,
+          'loops_json': session.loopsJson,
           'created_at': session.dateTime,
         });
 
@@ -521,6 +713,50 @@ class SupabaseSyncProvider extends ChangeNotifier {
       print("Synced ${unsynced.length} offline walk sessions to Supabase.");
     } catch (e) {
       print("Failed to sync unsynced sessions: $e");
+    }
+  }
+
+  /// Sync offline-captured claims outbox to Supabase
+  Future<void> syncUnsyncedClaims() async {
+    if (_currentUserId == null) return;
+    try {
+      final isar = await IsarService.getDB();
+      final unsynced = await isar.localClaimedLoops
+          .filter()
+          .userIdEqualTo(_currentUserId!)
+          .isSyncedEqualTo(false)
+          .findAll();
+
+      if (unsynced.isEmpty) return;
+
+      final client = Supabase.instance.client;
+      for (var claim in unsynced) {
+        final List<LatLng> points = [];
+        for (int i = 0; i < claim.latList.length; i++) {
+          points.add(LatLng(claim.latList[i], claim.lngList[i]));
+        }
+        final wktPolygon = toWktPolygon(points);
+
+        final res = await client.rpc('claim_loop_attempt', params: {
+          'p_user_id': _currentUserId,
+          'p_trail_coords': wktPolygon,
+          'p_default_name': claim.name,
+        });
+
+        if (res != null && res['success'] == true) {
+          claim.isSynced = true;
+          if (res['loop_id'] != null) {
+            claim.loopId = res['loop_id'] as String;
+          }
+        }
+      }
+
+      await isar.writeTxn(() async {
+        await isar.localClaimedLoops.putAll(unsynced);
+      });
+      print("Synced ${unsynced.length} offline claims to Supabase.");
+    } catch (e) {
+      print("Failed to sync offline claims: $e");
     }
   }
 }

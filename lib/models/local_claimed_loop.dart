@@ -8,6 +8,9 @@ class LocalClaimedLoop {
 
   @Index(unique: true, replace: true)
   late String loopId;
+
+  late String userId;
+  late bool isSynced;
   
   late String name;
   

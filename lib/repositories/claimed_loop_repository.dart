@@ -42,9 +42,11 @@ class ClaimedLoopRepository {
   }
 
   /// Converts a UI ClaimedLoop to Isar LocalClaimedLoop
-  LocalClaimedLoop _toLocal(ClaimedLoop loop) {
+  LocalClaimedLoop _toLocal(ClaimedLoop loop, String userId) {
     final local = LocalClaimedLoop()
       ..loopId = loop.id
+      ..userId = userId
+      ..isSynced = false
       ..name = loop.name
       ..latList = loop.points.map((p) => p.latitude).toList()
       ..lngList = loop.points.map((p) => p.longitude).toList()
@@ -58,7 +60,7 @@ class ClaimedLoopRepository {
   }
 
   /// Migrate old JSON data to Isar if it exists
-  Future<void> _migrateJsonToIsar(Isar isar) async {
+  Future<void> _migrateJsonToIsar(Isar isar, String currentUserId) async {
     try {
       final docsDir = await getApplicationDocumentsDirectory();
       final docsFile = File('${docsDir.path}/claimed_loops.json');
@@ -68,7 +70,7 @@ class ClaimedLoopRepository {
         final List<dynamic> jsonList = jsonDecode(jsonStr);
         final List<ClaimedLoop> oldLoops = jsonList.map((item) => ClaimedLoop.fromJson(item)).toList();
         
-        final List<LocalClaimedLoop> localLoops = oldLoops.map((l) => _toLocal(l)).toList();
+        final List<LocalClaimedLoop> localLoops = oldLoops.map((l) => _toLocal(l, currentUserId)).toList();
         
         await isar.writeTxn(() async {
           await isar.localClaimedLoops.putAll(localLoops);
@@ -84,19 +86,18 @@ class ClaimedLoopRepository {
   }
 
   /// Get claimed loops, automatically checking streaks and pruning expired ones
-  Future<List<ClaimedLoop>> getClaimedLoops() async {
+  Future<List<ClaimedLoop>> getClaimedLoops(String currentUserId) async {
     try {
       final isar = await IsarService.getDB();
-      await _migrateJsonToIsar(isar);
+      await _migrateJsonToIsar(isar, currentUserId);
 
-      final localList = await isar.localClaimedLoops.where().findAll();
+      final localList = await isar.localClaimedLoops.filter().userIdEqualTo(currentUserId).findAll();
       final List<ClaimedLoop> list = localList.map((l) => _toClaimedLoop(l)).toList();
 
       final today = getTodayDateString();
       bool changed = false;
       final List<ClaimedLoop> prunedList = [];
       final List<LocalClaimedLoop> localUpdates = [];
-      final List<int> localDeletes = [];
 
       for (int i = 0; i < list.length; i++) {
         final loop = list[i];
@@ -106,7 +107,9 @@ class ClaimedLoopRepository {
           // Reset daily count for the new day
           final updated = loop.copyWith(coveredCountToday: 0);
           prunedList.add(updated);
-          localUpdates.add(_toLocal(updated)..id = localItem.id);
+          localUpdates.add(_toLocal(updated, currentUserId)
+            ..id = localItem.id
+            ..isSynced = localItem.isSynced);
           changed = true;
         } else {
           prunedList.add(loop);
@@ -117,11 +120,6 @@ class ClaimedLoopRepository {
         await isar.writeTxn(() async {
           if (localUpdates.isNotEmpty) {
             await isar.localClaimedLoops.putAll(localUpdates);
-          }
-          if (localDeletes.isNotEmpty) {
-            for (var id in localDeletes) {
-              await isar.localClaimedLoops.delete(id);
-            }
           }
         });
       }
@@ -134,14 +132,25 @@ class ClaimedLoopRepository {
   }
 
   /// Save or batch-update a list of claimed loops in Isar
-  Future<void> saveClaimedLoops(List<ClaimedLoop> loops) async {
+  Future<void> saveClaimedLoops(List<ClaimedLoop> loops, String currentUserId) async {
     try {
       final isar = await IsarService.getDB();
       
       await isar.writeTxn(() async {
-        // Clear existing and replace
-        await isar.localClaimedLoops.clear();
-        final localList = loops.map((l) => _toLocal(l)).toList();
+        // Keep unsynced local claims of this user
+        final unsynced = await isar.localClaimedLoops
+            .filter()
+            .userIdEqualTo(currentUserId)
+            .isSyncedEqualTo(false)
+            .findAll();
+
+        // Clear existing claims of this user
+        await isar.localClaimedLoops.filter().userIdEqualTo(currentUserId).deleteAll();
+
+        final localList = loops.map((l) => _toLocal(l, currentUserId)..isSynced = true).toList();
+        if (unsynced.isNotEmpty) {
+          localList.addAll(unsynced);
+        }
         await isar.localClaimedLoops.putAll(localList);
       });
     } catch (e) {
@@ -150,14 +159,18 @@ class ClaimedLoopRepository {
   }
 
   /// Add or update a single claimed loop in local Isar database
-  Future<void> addOrUpdateClaimedLoop(ClaimedLoop loop) async {
+  Future<void> addOrUpdateClaimedLoop(ClaimedLoop loop, String currentUserId, {bool isSynced = false}) async {
     try {
       final isar = await IsarService.getDB();
       
       // Check if loop already exists by loopId
-      final existing = await isar.localClaimedLoops.filter().loopIdEqualTo(loop.id).findFirst();
+      final existing = await isar.localClaimedLoops
+          .filter()
+          .loopIdEqualTo(loop.id)
+          .userIdEqualTo(currentUserId)
+          .findFirst();
       
-      final localItem = _toLocal(loop);
+      final localItem = _toLocal(loop, currentUserId)..isSynced = isSynced;
       if (existing != null) {
         localItem.id = existing.id; // Retain Isar primary key to perform update
       }
@@ -171,10 +184,14 @@ class ClaimedLoopRepository {
   }
 
   /// Remove a claimed loop from Isar (abandon claim)
-  Future<void> deleteClaim(String loopId) async {
+  Future<void> deleteClaim(String loopId, String currentUserId) async {
     try {
       final isar = await IsarService.getDB();
-      final existing = await isar.localClaimedLoops.filter().loopIdEqualTo(loopId).findFirst();
+      final existing = await isar.localClaimedLoops
+          .filter()
+          .loopIdEqualTo(loopId)
+          .userIdEqualTo(currentUserId)
+          .findFirst();
       if (existing != null) {
         await isar.writeTxn(() async {
           await isar.localClaimedLoops.delete(existing.id);

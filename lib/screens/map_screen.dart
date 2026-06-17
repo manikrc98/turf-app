@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle, HapticFeedback;
@@ -32,33 +31,7 @@ class MapScreen extends StatefulWidget {
   State<MapScreen> createState() => _MapScreenState();
 }
 
-class GlowPathCache {
-  final List<LatLng> closedPoints;
-  final List<double> cumulativeDistances;
-  final double totalLength;
-  final double minLat;
-  final double maxLat;
-  final double minLng;
-  final double maxLng;
-
-  GlowPathCache({
-    required this.closedPoints,
-    required this.cumulativeDistances,
-    required this.totalLength,
-    required this.minLat,
-    required this.maxLat,
-    required this.minLng,
-    required this.maxLng,
-  });
-}
-
 class _MapScreenState extends State<MapScreen> {
-  Timer? _glowTimer;
-  final ValueNotifier<double> _glowPhaseNotifier = ValueNotifier<double>(0.0);
-  double _glowPhase = 0.0;
-  final Map<String, GlowPathCache> _glowPathCache = {};
-
-  LatLngBounds? _visibleBounds;
   Set<Polygon> _cachedPolygons = {};
   Set<Marker> _cachedMarkers = {};
   Set<Polyline> _cachedStaticPolylines = {};
@@ -85,9 +58,10 @@ class _MapScreenState extends State<MapScreen> {
   // Real-time location and heading variables
   LatLng? _currentLocation;
   LatLng? _lastSyncCameraCenter;
-  double _currentHeading = 0.0;
   bool _shouldFollowCamera = true;
   bool _isProgrammaticMovement = false;
+  bool _isCameraMoving = false;
+  final ValueNotifier<double> _currentHeadingNotifier = ValueNotifier<double>(0.0);
 
   // Marker caching to avoid UI freezes during map rebuilds
   String _lastCacheStateKey = "";
@@ -99,12 +73,6 @@ class _MapScreenState extends State<MapScreen> {
   @override
   void initState() {
     super.initState();
-    _glowTimer = Timer.periodic(const Duration(milliseconds: 50), (timer) {
-      if (mounted) {
-        _glowPhase = (_glowPhase + 0.01) % 1.0;
-        _glowPhaseNotifier.value = _glowPhase;
-      }
-    });
     _checkPermissionsAndInit();
   }
 
@@ -235,30 +203,47 @@ class _MapScreenState extends State<MapScreen> {
       }
     });
 
-    _realtimeCompassSubscription?.cancel();
-    _realtimeCompassSubscription = FlutterCompass.events?.listen((CompassEvent event) {
-      if (mounted) {
-        final double? heading = event.heading;
-        if (heading != null) {
-          double normHeading = heading;
-          if (normHeading < 0) normHeading += 360.0;
-          setState(() {
-            _currentHeading = normHeading;
-          });
-        }
-      }
-    });
+    _updateSensorSubscriptions();
   }
 
   @override
   void dispose() {
-    _glowTimer?.cancel();
-    _glowPhaseNotifier.dispose();
+    _currentHeadingNotifier.dispose();
     _loopCapturedSubscription?.cancel();
     _claimedLoopCoveredSubscription?.cancel();
     _realtimeLocationSubscription?.cancel();
     _realtimeCompassSubscription?.cancel();
     super.dispose();
+  }
+
+
+
+  void _updateSensorSubscriptions() {
+    if (!mounted) return;
+
+    final bool shouldListenCompass = _currentTabIndex == 0 && _permissionsGranted && !_isCameraMoving;
+
+    if (shouldListenCompass) {
+      if (_realtimeCompassSubscription == null) {
+        _realtimeCompassSubscription = FlutterCompass.events?.listen((CompassEvent event) {
+          if (!mounted) return;
+          final double? heading = event.heading;
+          if (heading != null) {
+            double normHeading = heading;
+            if (normHeading < 0) normHeading += 360.0;
+
+            final double diff = (normHeading - _currentHeadingNotifier.value).abs();
+            final double adjustedDiff = diff > 180 ? 360 - diff : diff;
+            if (adjustedDiff >= 3.0) {
+              _currentHeadingNotifier.value = normHeading;
+            }
+          }
+        });
+      }
+    } else {
+      _realtimeCompassSubscription?.cancel();
+      _realtimeCompassSubscription = null;
+    }
   }
 
   @override
@@ -271,19 +256,12 @@ class _MapScreenState extends State<MapScreen> {
       return _buildPermissionDeniedUI();
     }
 
-    final trackingProvider = Provider.of<LocationTrackingProvider>(context);
+    // Do NOT listen to LocationTrackingProvider at the screen level to avoid unnecessary rebuilds.
 
-    // Update static map elements (polygons, markers, static polylines) on parent build
-    _updateStaticMapObjects(trackingProvider);
-
-    // Pre-cache custom map markers
-    final cacheKey = _getCacheStateKey(trackingProvider);
-    if (cacheKey != _lastCacheStateKey) {
-      _lastCacheStateKey = cacheKey;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _preCacheMarkers(trackingProvider);
-      });
-    }
+    // Make sure sensor states are synchronized
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _updateSensorSubscriptions();
+    });
 
     return Scaffold(
       backgroundColor: const Color(0xFF0A0A0A),
@@ -305,210 +283,226 @@ class _MapScreenState extends State<MapScreen> {
                 index: _currentTabIndex,
                 children: [
                   // Tab 0: Map HUD Stack
-                  Stack(
-                    children: [
-                      // Google Map View
-                      if (_mapStyleString == null)
-                        const Positioned.fill(
-                          child: MapViewportSkeleton(),
-                        )
-                      else
-                        ValueListenableBuilder<double>(
-                          valueListenable: _glowPhaseNotifier,
-                          builder: (context, phase, child) {
-                            return GoogleMap(
-                              style: _mapStyleString,
-                              initialCameraPosition: const CameraPosition(
-                                target: LatLng(0.0, 0.0),
-                                zoom: 17.0,
-                              ),
-                              myLocationButtonEnabled: false,
-                              myLocationEnabled: false,
-                              compassEnabled: false, // Turn off native compass for HUD feel
-                              zoomControlsEnabled: false,
-                              mapType: MapType.normal,
-                              polylines: Set<Polyline>.of(_cachedStaticPolylines)
-                                ..addAll(_buildGlowPolylines(trackingProvider, phase)),
-                              polygons: _cachedPolygons,
-                              markers: _cachedMarkers,
-                              onMapCreated: (GoogleMapController controller) async {
-                                _mapController.complete(controller);
-                                // Hide native map load pops (e.g. style initialization flash)
-                                await Future.delayed(const Duration(milliseconds: 1000));
-                                if (mounted) {
-                                  LatLngBounds? bounds;
-                                  try {
-                                    bounds = await controller.getVisibleRegion();
-                                  } catch (e) {
-                                    print("Failed to get visible bounds onMapCreated: $e");
-                                  }
-                                  setState(() {
-                                    _mapReady = true;
-                                    _visibleBounds = bounds;
-                                  });
-                                }
-                              },
-                              onCameraMoveStarted: () {
-                                if (!_isProgrammaticMovement) {
-                                  _shouldFollowCamera = false;
-                                }
-                                _isProgrammaticMovement = false;
-                              },
-                              onCameraMove: (CameraPosition position) {
-                                _currentZoom = position.zoom;
-                              },
-                              onCameraIdle: () async {
-                                LatLngBounds? bounds;
-                                try {
-                                  final controller = await _mapController.future;
-                                  bounds = await controller.getVisibleRegion();
-                                  _visibleBounds = bounds;
-                                } catch (e) {
-                                  print("Failed to get visible bounds onCameraIdle: $e");
-                                }
+                  Consumer<LocationTrackingProvider>(
+                    builder: (context, trackingProvider, child) {
+                      // Update static map elements (polygons, markers, static polylines) on parent build
+                      _updateStaticMapObjects(trackingProvider);
 
-                                if (mounted) {
-                                  setState(() {});
-                                }
+                      // Pre-cache custom map markers
+                      final cacheKey = _getCacheStateKey(trackingProvider);
+                      if (cacheKey != _lastCacheStateKey) {
+                        _lastCacheStateKey = cacheKey;
+                        WidgetsBinding.instance.addPostFrameCallback((_) {
+                          _preCacheMarkers(trackingProvider);
+                        });
+                      }
 
-                                try {
-                                  if (bounds != null) {
-                                    final LatLng cameraCenter = LatLng(
-                                      (bounds.northeast.latitude + bounds.southwest.latitude) / 2,
-                                      (bounds.northeast.longitude + bounds.southwest.longitude) / 2,
-                                    );
-
-                                    if (_lastSyncCameraCenter == null ||
-                                        LoopDetector.calculateDistanceMetres(
-                                              _lastSyncCameraCenter!.latitude,
-                                              _lastSyncCameraCenter!.longitude,
-                                              cameraCenter.latitude,
-                                              cameraCenter.longitude,
-                                            ) >
-                                            1000.0) {
-                                      _lastSyncCameraCenter = cameraCenter;
-                                      if (mounted) {
-                                        final syncProvider = Provider.of<SupabaseSyncProvider>(context, listen: false);
-                                        await syncProvider.pullClaims(center: cameraCenter);
-                                      }
+                      return Stack(
+                        children: [
+                          // Google Map View
+                          if (_mapStyleString == null)
+                            const Positioned.fill(
+                              child: MapViewportSkeleton(),
+                            )
+                          else
+                            ValueListenableBuilder<double>(
+                              valueListenable: _currentHeadingNotifier,
+                              builder: (context, heading, child) {
+                                final markers = _buildMarkersWithHeading(trackingProvider, heading);
+                                return GoogleMap(
+                                  style: _mapStyleString,
+                                  initialCameraPosition: const CameraPosition(
+                                    target: LatLng(0.0, 0.0),
+                                    zoom: 17.0,
+                                  ),
+                                  myLocationButtonEnabled: false,
+                                  myLocationEnabled: false,
+                                  compassEnabled: false, // Turn off native compass for HUD feel
+                                  zoomControlsEnabled: false,
+                                  mapType: MapType.normal,
+                                  polylines: _cachedStaticPolylines,
+                                  polygons: _cachedPolygons,
+                                  markers: markers,
+                                  onMapCreated: (GoogleMapController controller) async {
+                                    _mapController.complete(controller);
+                                    // Hide native map load pops (e.g. style initialization flash)
+                                    await Future.delayed(const Duration(milliseconds: 1000));
+                                    if (mounted) {
+                                      setState(() {
+                                        _mapReady = true;
+                                      });
+                                      _updateSensorSubscriptions();
                                     }
-                                  }
-                                } catch (e) {
-                                  print("Failed to sync on camera idle: $e");
-                                }
-                              },
-                            );
-                          },
-                        ),
+                                  },
+                                  onCameraMoveStarted: () {
+                                    if (!_isProgrammaticMovement) {
+                                      _shouldFollowCamera = false;
+                                    }
+                                    _isProgrammaticMovement = false;
+                                    _isCameraMoving = true;
+                                    _updateSensorSubscriptions();
+                                  },
+                                  onCameraMove: (CameraPosition position) {
+                                    _currentZoom = position.zoom;
+                                  },
+                                  onCameraIdle: () async {
+                                    _isCameraMoving = false;
+                                    _updateSensorSubscriptions();
 
-                      // Overlay to fade transition the native map load pop
-                      if (_mapStyleString != null)
-                        Positioned.fill(
-                          child: AnimatedOpacity(
-                            opacity: _mapReady ? 0.0 : 1.0,
-                            duration: const Duration(milliseconds: 350),
-                            child: IgnorePointer(
-                              ignoring: _mapReady,
-                              child: const MapViewportSkeleton(),
+                                    LatLngBounds? bounds;
+                                    try {
+                                      final controller = await _mapController.future;
+                                      bounds = await controller.getVisibleRegion();
+                                    } catch (e) {
+                                      print("Failed to get visible bounds onCameraIdle: $e");
+                                    }
+
+                                    if (mounted) {
+                                      setState(() {});
+                                    }
+
+                                    try {
+                                      if (bounds != null) {
+                                        final LatLng cameraCenter = LatLng(
+                                          (bounds.northeast.latitude + bounds.southwest.latitude) / 2,
+                                          (bounds.northeast.longitude + bounds.southwest.longitude) / 2,
+                                        );
+
+                                        if (_lastSyncCameraCenter == null ||
+                                            LoopDetector.calculateDistanceMetres(
+                                                  _lastSyncCameraCenter!.latitude,
+                                                  _lastSyncCameraCenter!.longitude,
+                                                  cameraCenter.latitude,
+                                                  cameraCenter.longitude,
+                                                ) >
+                                                1000.0) {
+                                          _lastSyncCameraCenter = cameraCenter;
+                                          if (mounted) {
+                                            final syncProvider = Provider.of<SupabaseSyncProvider>(context, listen: false);
+                                            await syncProvider.pullClaims(center: cameraCenter);
+                                          }
+                                        }
+                                      }
+                                    } catch (e) {
+                                      print("Failed to sync on camera idle: $e");
+                                    }
+                                  },
+                                );
+                              },
+                            ),
+
+                          // Overlay to fade transition the native map load pop
+                          if (_mapStyleString != null)
+                            Positioned.fill(
+                              child: AnimatedOpacity(
+                                opacity: _mapReady ? 0.0 : 1.0,
+                                duration: const Duration(milliseconds: 350),
+                                child: IgnorePointer(
+                                  ignoring: _mapReady,
+                                  child: const MapViewportSkeleton(),
+                                ),
+                              ),
+                            ),
+
+                          // Status Chips (Paused / GPS Signal)
+                          Positioned(
+                            top: 16.0,
+                            right: 16.0,
+                            child: Selector<TrackingMetricsProvider, SessionStatus>(
+                              selector: (_, p) => p.sessionStatus,
+                              builder: (context, status, _) {
+                                final isWeak = trackingProvider.gpsSignalWeak;
+                                return Column(
+                                  crossAxisAlignment: CrossAxisAlignment.end,
+                                  children: [
+                                    if (status == SessionStatus.paused)
+                                      _buildStatusChip("WALK_PAUSED", const Color(0xFFFF6B00)),
+                                    if (isWeak && status == SessionStatus.active)
+                                      const SizedBox(height: 8),
+                                    if (isWeak && status == SessionStatus.active)
+                                      _buildStatusChip("WEAK_GPS_SIGNAL", const Color(0xFFFF3B3B)),
+                                  ],
+                                );
+                              },
                             ),
                           ),
-                        ),
 
-                      // Status Chips (Paused / GPS Signal)
-                      Positioned(
-                        top: 16.0,
-                        right: 16.0,
-                        child: Selector<TrackingMetricsProvider, SessionStatus>(
-                          selector: (_, p) => p.sessionStatus,
-                          builder: (context, status, _) {
-                            final isWeak = trackingProvider.gpsSignalWeak;
-                            return Column(
-                              crossAxisAlignment: CrossAxisAlignment.end,
-                              children: [
-                                if (status == SessionStatus.paused)
-                                  _buildStatusChip("WALK_PAUSED", const Color(0xFFFF6B00)),
-                                if (isWeak && status == SessionStatus.active)
-                                  const SizedBox(height: 8),
-                                if (isWeak && status == SessionStatus.active)
-                                  _buildStatusChip("WEAK_GPS_SIGNAL", const Color(0xFFFF3B3B)),
-                              ],
-                            );
-                          },
-                        ),
-                      ),
-
-                      // Location FAB
-                      Selector<TrackingMetricsProvider, SessionStatus>(
-                        selector: (_, p) => p.sessionStatus,
-                        builder: (context, status, _) {
-                          // Position FAB 88px above screen bottom (bottom navigation clearance is 64px)
-                          // If active walk sheet is open, we offset it slightly above sheet height to avoid overlapping.
-                          final double bottomOffset = status == SessionStatus.idle
-                              ? 88.0
-                              : 290.0;
-                          return Positioned(
-                            bottom: bottomOffset,
-                            right: 16.0,
-                            child: GestureDetector(
-                              onTap: () async {
-                                HapticFeedback.heavyImpact();
-                                SoundManager.playRecenter();
-                                _shouldFollowCamera = true;
-                                if (_currentLocation != null) {
-                                  _isProgrammaticMovement = true;
-                                  final controller = await _mapController.future;
-                                  controller.animateCamera(
-                                    CameraUpdate.newLatLngZoom(_currentLocation!, 17.0),
-                                  );
-                                }
-                              },
-                              child: Container(
-                                width: 44,
-                                height: 44,
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFF1E1E1E),
-                                  border: Border.all(color: const Color(0xFF2A2A2A), width: 1.0),
-                                  borderRadius: BorderRadius.circular(4),
+                          // Location FAB
+                          Selector<TrackingMetricsProvider, SessionStatus>(
+                            selector: (_, p) => p.sessionStatus,
+                            builder: (context, status, _) {
+                              final double bottomOffset = status == SessionStatus.idle
+                                  ? 88.0
+                                  : 290.0;
+                              return Positioned(
+                                bottom: bottomOffset,
+                                right: 16.0,
+                                child: GestureDetector(
+                                  onTap: () async {
+                                    HapticFeedback.heavyImpact();
+                                    SoundManager.playRecenter();
+                                    _shouldFollowCamera = true;
+                                    if (_currentLocation != null) {
+                                      _isProgrammaticMovement = true;
+                                      final controller = await _mapController.future;
+                                      controller.animateCamera(
+                                        CameraUpdate.newLatLngZoom(_currentLocation!, 17.0),
+                                      );
+                                    }
+                                  },
+                                  child: Container(
+                                    width: 44,
+                                    height: 44,
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFF1E1E1E),
+                                      border: Border.all(color: const Color(0xFF2A2A2A), width: 1.0),
+                                      borderRadius: BorderRadius.circular(4),
+                                    ),
+                                    child: const Center(
+                                      child: Icon(Icons.gps_fixed_outlined, color: Color(0xFF888888), size: 20),
+                                    ),
+                                  ),
                                 ),
-                                child: const Center(
-                                  child: Icon(Icons.gps_fixed_outlined, color: Color(0xFF888888), size: 20),
+                              );
+                            },
+                          ),
+
+                          // Start Walk CTA (Only visible when Idle)
+                          Selector<TrackingMetricsProvider, SessionStatus>(
+                            selector: (_, p) => p.sessionStatus,
+                            builder: (context, status, _) {
+                              if (status != SessionStatus.idle) return const SizedBox.shrink();
+                              return Positioned(
+                                bottom: 16.0,
+                                left: 16.0,
+                                right: 16.0,
+                                child: CrtStartWalkButton(
+                                  onPressed: () {
+                                    HapticFeedback.heavyImpact();
+                                    SoundManager.playStartWalk();
+                                    trackingProvider.startWalk();
+                                  },
                                 ),
-                              ),
-                            ),
-                          );
-                        },
-                      ),
+                              );
+                            },
+                          ),
 
-                      // Start Walk CTA (Only visible when Idle)
-                      Selector<TrackingMetricsProvider, SessionStatus>(
-                        selector: (_, p) => p.sessionStatus,
-                        builder: (context, status, _) {
-                          if (status != SessionStatus.idle) return const SizedBox.shrink();
-                          return Positioned(
-                            bottom: 16.0,
-                            left: 16.0,
-                            right: 16.0,
-                            child: CrtStartWalkButton(
-                              onPressed: () {
-                                HapticFeedback.heavyImpact();
-                                SoundManager.playStartWalk();
-                                trackingProvider.startWalk();
-                              },
-                            ),
-                          );
-                        },
-                      ),
-
-                      // Active Walk HUD Panel (Only visible when not Idle)
-                      _buildActiveWalkPanel(trackingProvider),
-                    ],
+                          // Active Walk HUD Panel (Only visible when not Idle)
+                          _buildActiveWalkPanel(trackingProvider),
+                        ],
+                      );
+                    },
                   ),
 
                   // Tab 1: Walk History view
                   const HistoryBottomSheet(), // Converted to full-screen view inside bottom sheet file
 
                   // Tab 2: MORE Full-screen Menu
-                  _buildMoreTab(trackingProvider),
+                  Consumer<LocationTrackingProvider>(
+                    builder: (context, trackingProvider, child) {
+                      return _buildMoreTab(trackingProvider);
+                    },
+                  ),
                 ],
               ),
             ),
@@ -1103,6 +1097,26 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
+  Set<Marker> _buildMarkersWithHeading(LocationTrackingProvider provider, double heading) {
+    final Set<Marker> markers = Set<Marker>.from(_cachedMarkers);
+    markers.removeWhere((m) => m.markerId.value == "user_position");
+    final userPosition = _currentLocation ?? provider.trailPoints.lastOrNull;
+    if (userPosition != null && _userIcon != null) {
+      markers.add(
+        Marker(
+          markerId: const MarkerId("user_position"),
+          position: userPosition,
+          icon: _userIcon!,
+          anchor: const Offset(0.5, 0.5),
+          rotation: heading,
+          flat: true,
+          zIndexInt: 10,
+        ),
+      );
+    }
+    return markers;
+  }
+
   Set<Marker> _buildMarkersSync(LocationTrackingProvider provider) {
     final Set<Marker> markers = {};
 
@@ -1115,7 +1129,7 @@ class _MapScreenState extends State<MapScreen> {
           position: userPosition,
           icon: _userIcon!,
           anchor: const Offset(0.5, 0.5),
-          rotation: _currentHeading,
+          rotation: _currentHeadingNotifier.value,
           flat: true,
           zIndexInt: 10,
         ),
@@ -1273,68 +1287,7 @@ class _MapScreenState extends State<MapScreen> {
     return polylines;
   }
 
-  Set<Polyline> _buildGlowPolylines(LocationTrackingProvider provider, double phase) {
-    final Set<Polyline> polylines = {};
-    // Add travelling glow polylines for actively claimed loops
-    for (var claim in provider.cachedClaimedLoops) {
-      if (!claim.isActive || claim.ownerId.isEmpty) continue; // Only animate active claims
 
-      final String cacheKey = claim.id;
-      final GlowPathCache? cache = _glowPathCache[cacheKey];
-      if (cache != null && !_isLoopVisible(cache, _visibleBounds)) {
-        continue;
-      }
-
-      final Color baseColor = claim.isMyClaim 
-          ? const Color(0xFFB8FF00) // Lime green for HELD
-          : const Color(0xFFFF6B00); // Orange for CONTESTED
-
-      final List<LatLng> glowPoints = _extractGlowSegment(claim, phase);
-      if (glowPoints.length >= 2) {
-        // Outer glow
-        polylines.add(
-          Polyline(
-            polylineId: PolylineId("claim_glow_outer_${claim.id}"),
-            points: glowPoints,
-            color: baseColor.withOpacity(0.35),
-            width: 12,
-            jointType: JointType.round,
-            startCap: Cap.roundCap,
-            endCap: Cap.roundCap,
-            zIndex: 3,
-          ),
-        );
-        // Inner glow
-        polylines.add(
-          Polyline(
-            polylineId: PolylineId("claim_glow_inner_${claim.id}"),
-            points: glowPoints,
-            color: baseColor.withOpacity(0.9),
-            width: 6,
-            jointType: JointType.round,
-            startCap: Cap.roundCap,
-            endCap: Cap.roundCap,
-            zIndex: 4,
-          ),
-        );
-        // Core laser highlight
-        polylines.add(
-          Polyline(
-            polylineId: PolylineId("claim_glow_core_${claim.id}"),
-            points: glowPoints,
-            color: Colors.white,
-            width: 2,
-            jointType: JointType.round,
-            startCap: Cap.roundCap,
-            endCap: Cap.roundCap,
-            zIndex: 5,
-          ),
-        );
-      }
-    }
-
-    return polylines;
-  }
 
   Set<Polygon> _buildPolygons(LocationTrackingProvider provider) {
     final Set<Polygon> polygons = {};
@@ -1875,154 +1828,7 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
-  List<LatLng> _extractGlowSegment(ClaimedLoop claim, double phase) {
-    final String cacheKey = claim.id;
-    GlowPathCache? pathCache = _glowPathCache[cacheKey];
 
-    if (pathCache == null) {
-      final points = claim.points;
-      if (points.isEmpty) return [];
-
-      final closedPoints = List<LatLng>.from(points);
-      if (closedPoints.first != closedPoints.last) {
-        closedPoints.add(closedPoints.first);
-      }
-
-      final int numPoints = closedPoints.length;
-      final List<double> cumulativeDistances = List<double>.filled(numPoints, 0.0);
-      double totalLength = 0.0;
-      cumulativeDistances[0] = 0.0;
-
-      double minLat = closedPoints.first.latitude;
-      double maxLat = closedPoints.first.latitude;
-      double minLng = closedPoints.first.longitude;
-      double maxLng = closedPoints.first.longitude;
-
-      for (int i = 0; i < numPoints; i++) {
-        final pt = closedPoints[i];
-        if (pt.latitude < minLat) minLat = pt.latitude;
-        if (pt.latitude > maxLat) maxLat = pt.latitude;
-        if (pt.longitude < minLng) minLng = pt.longitude;
-        if (pt.longitude > maxLng) maxLng = pt.longitude;
-
-        if (i < numPoints - 1) {
-          final dist = _getDistance(pt, closedPoints[i + 1]);
-          totalLength += dist;
-          cumulativeDistances[i + 1] = totalLength;
-        }
-      }
-
-      pathCache = GlowPathCache(
-        closedPoints: closedPoints,
-        cumulativeDistances: cumulativeDistances,
-        totalLength: totalLength,
-        minLat: minLat,
-        maxLat: maxLat,
-        minLng: minLng,
-        maxLng: maxLng,
-      );
-      _glowPathCache[cacheKey] = pathCache;
-    }
-
-    final double totalLength = pathCache.totalLength;
-    if (totalLength <= 0.0) return [];
-
-    final double glowLength = totalLength * 0.25;
-    final double startDist = phase * totalLength;
-    final double endDist = startDist + glowLength;
-
-    final double s = startDist % totalLength;
-    final double e = endDist % totalLength;
-
-    final List<LatLng> result = [];
-    if (s <= e) {
-      _addPointsForRange(pathCache.closedPoints, pathCache.cumulativeDistances, totalLength, s, e, result);
-    } else {
-      _addPointsForRange(pathCache.closedPoints, pathCache.cumulativeDistances, totalLength, s, totalLength, result);
-      _addPointsForRange(pathCache.closedPoints, pathCache.cumulativeDistances, totalLength, 0.0, e, result);
-    }
-    return result;
-  }
-
-  bool _isLoopVisible(GlowPathCache cache, LatLngBounds? bounds) {
-    if (bounds == null) return true;
-
-    // Check if the loop's bounding box overlaps with the visible bounds (plus ~500m safety padding).
-    const double padding = 0.005;
-    final double minLatLimit = bounds.southwest.latitude - padding;
-    final double maxLatLimit = bounds.northeast.latitude + padding;
-    final double minLngLimit = bounds.southwest.longitude - padding;
-    final double maxLngLimit = bounds.northeast.longitude + padding;
-
-    return (cache.minLat <= maxLatLimit && cache.maxLat >= minLatLimit) &&
-           (cache.minLng <= maxLngLimit && cache.maxLng >= minLngLimit);
-  }
-
-  double _getDistance(LatLng p1, LatLng p2) {
-    const double earthRadius = 6371000.0; // in meters
-    final double dLat = _toRadians(p2.latitude - p1.latitude);
-    final double dLng = _toRadians(p2.longitude - p1.longitude);
-    final double a = math.sin(dLat / 2) * math.sin(dLat / 2) +
-        math.cos(_toRadians(p1.latitude)) * math.cos(_toRadians(p2.latitude)) *
-        math.sin(dLng / 2) * math.sin(dLng / 2);
-    final double c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a));
-    return earthRadius * c;
-  }
-
-  double _toRadians(double degree) {
-    return degree * math.pi / 180.0;
-  }
-
-  LatLng _interpolate(LatLng p1, LatLng p2, double fraction) {
-    final double lat = p1.latitude + (p2.latitude - p1.latitude) * fraction;
-    final double lng = p1.longitude + (p2.longitude - p1.longitude) * fraction;
-    return LatLng(lat, lng);
-  }
-
-  LatLng _getInterpolatedPoint(List<LatLng> points, List<double> cumD, double totalLength, double d) {
-    if (d <= 0.0) return points.first;
-    if (d >= totalLength) return points.last;
-
-    for (int i = 0; i < points.length - 1; i++) {
-      final double d1 = cumD[i];
-      final double d2 = cumD[i + 1];
-      if (d >= d1 && d <= d2) {
-        final double denom = d2 - d1;
-        final double fraction = denom > 0.0 ? (d - d1) / denom : 0.0;
-        return _interpolate(points[i], points[i + 1], fraction);
-      }
-    }
-    return points.last;
-  }
-
-  void _addPointsForRange(
-    List<LatLng> points,
-    List<double> cumD,
-    double totalLength,
-    double startD,
-    double endD,
-    List<LatLng> result,
-  ) {
-    final LatLng startPt = _getInterpolatedPoint(points, cumD, totalLength, startD);
-    if (result.isEmpty || startPt != result.last) {
-      result.add(startPt);
-    }
-
-    for (int i = 0; i < points.length; i++) {
-      final double d = cumD[i];
-      if (d > startD && d < endD) {
-        final LatLng pt = points[i];
-        if (pt != result.last) {
-          result.add(pt);
-        }
-      }
-    }
-
-    final LatLng endPt = _getInterpolatedPoint(points, cumD, totalLength, endD);
-    if (endPt != result.last) {
-      result.add(endPt);
-    }
-  }
 }
 
 // ----------------------------------------------------

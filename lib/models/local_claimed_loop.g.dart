@@ -27,45 +27,55 @@ const LocalClaimedLoopSchema = CollectionSchema(
       name: r'isMyClaim',
       type: IsarType.bool,
     ),
-    r'lastCoveredDate': PropertySchema(
+    r'isSynced': PropertySchema(
       id: 2,
+      name: r'isSynced',
+      type: IsarType.bool,
+    ),
+    r'lastCoveredDate': PropertySchema(
+      id: 3,
       name: r'lastCoveredDate',
       type: IsarType.string,
     ),
     r'latList': PropertySchema(
-      id: 3,
+      id: 4,
       name: r'latList',
       type: IsarType.doubleList,
     ),
     r'lngList': PropertySchema(
-      id: 4,
+      id: 5,
       name: r'lngList',
       type: IsarType.doubleList,
     ),
     r'loopId': PropertySchema(
-      id: 5,
+      id: 6,
       name: r'loopId',
       type: IsarType.string,
     ),
     r'name': PropertySchema(
-      id: 6,
+      id: 7,
       name: r'name',
       type: IsarType.string,
     ),
     r'ownerId': PropertySchema(
-      id: 7,
+      id: 8,
       name: r'ownerId',
       type: IsarType.string,
     ),
     r'ownerName': PropertySchema(
-      id: 8,
+      id: 9,
       name: r'ownerName',
       type: IsarType.string,
     ),
     r'streakCount': PropertySchema(
-      id: 9,
+      id: 10,
       name: r'streakCount',
       type: IsarType.long,
+    ),
+    r'userId': PropertySchema(
+      id: 11,
+      name: r'userId',
+      type: IsarType.string,
     )
   },
   estimateSize: _localClaimedLoopEstimateSize,
@@ -109,6 +119,7 @@ int _localClaimedLoopEstimateSize(
   bytesCount += 3 + object.name.length * 3;
   bytesCount += 3 + object.ownerId.length * 3;
   bytesCount += 3 + object.ownerName.length * 3;
+  bytesCount += 3 + object.userId.length * 3;
   return bytesCount;
 }
 
@@ -120,14 +131,16 @@ void _localClaimedLoopSerialize(
 ) {
   writer.writeLong(offsets[0], object.coveredCountToday);
   writer.writeBool(offsets[1], object.isMyClaim);
-  writer.writeString(offsets[2], object.lastCoveredDate);
-  writer.writeDoubleList(offsets[3], object.latList);
-  writer.writeDoubleList(offsets[4], object.lngList);
-  writer.writeString(offsets[5], object.loopId);
-  writer.writeString(offsets[6], object.name);
-  writer.writeString(offsets[7], object.ownerId);
-  writer.writeString(offsets[8], object.ownerName);
-  writer.writeLong(offsets[9], object.streakCount);
+  writer.writeBool(offsets[2], object.isSynced);
+  writer.writeString(offsets[3], object.lastCoveredDate);
+  writer.writeDoubleList(offsets[4], object.latList);
+  writer.writeDoubleList(offsets[5], object.lngList);
+  writer.writeString(offsets[6], object.loopId);
+  writer.writeString(offsets[7], object.name);
+  writer.writeString(offsets[8], object.ownerId);
+  writer.writeString(offsets[9], object.ownerName);
+  writer.writeLong(offsets[10], object.streakCount);
+  writer.writeString(offsets[11], object.userId);
 }
 
 LocalClaimedLoop _localClaimedLoopDeserialize(
@@ -140,14 +153,16 @@ LocalClaimedLoop _localClaimedLoopDeserialize(
   object.coveredCountToday = reader.readLong(offsets[0]);
   object.id = id;
   object.isMyClaim = reader.readBool(offsets[1]);
-  object.lastCoveredDate = reader.readString(offsets[2]);
-  object.latList = reader.readDoubleList(offsets[3]) ?? [];
-  object.lngList = reader.readDoubleList(offsets[4]) ?? [];
-  object.loopId = reader.readString(offsets[5]);
-  object.name = reader.readString(offsets[6]);
-  object.ownerId = reader.readString(offsets[7]);
-  object.ownerName = reader.readString(offsets[8]);
-  object.streakCount = reader.readLong(offsets[9]);
+  object.isSynced = reader.readBool(offsets[2]);
+  object.lastCoveredDate = reader.readString(offsets[3]);
+  object.latList = reader.readDoubleList(offsets[4]) ?? [];
+  object.lngList = reader.readDoubleList(offsets[5]) ?? [];
+  object.loopId = reader.readString(offsets[6]);
+  object.name = reader.readString(offsets[7]);
+  object.ownerId = reader.readString(offsets[8]);
+  object.ownerName = reader.readString(offsets[9]);
+  object.streakCount = reader.readLong(offsets[10]);
+  object.userId = reader.readString(offsets[11]);
   return object;
 }
 
@@ -163,13 +178,13 @@ P _localClaimedLoopDeserializeProp<P>(
     case 1:
       return (reader.readBool(offset)) as P;
     case 2:
-      return (reader.readString(offset)) as P;
+      return (reader.readBool(offset)) as P;
     case 3:
-      return (reader.readDoubleList(offset) ?? []) as P;
+      return (reader.readString(offset)) as P;
     case 4:
       return (reader.readDoubleList(offset) ?? []) as P;
     case 5:
-      return (reader.readString(offset)) as P;
+      return (reader.readDoubleList(offset) ?? []) as P;
     case 6:
       return (reader.readString(offset)) as P;
     case 7:
@@ -177,7 +192,11 @@ P _localClaimedLoopDeserializeProp<P>(
     case 8:
       return (reader.readString(offset)) as P;
     case 9:
+      return (reader.readString(offset)) as P;
+    case 10:
       return (reader.readLong(offset)) as P;
+    case 11:
+      return (reader.readString(offset)) as P;
     default:
       throw IsarError('Unknown property with id $propertyId');
   }
@@ -494,6 +513,16 @@ extension LocalClaimedLoopQueryFilter
     return QueryBuilder.apply(this, (query) {
       return query.addFilterCondition(FilterCondition.equalTo(
         property: r'isMyClaim',
+        value: value,
+      ));
+    });
+  }
+
+  QueryBuilder<LocalClaimedLoop, LocalClaimedLoop, QAfterFilterCondition>
+      isSyncedEqualTo(bool value) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.equalTo(
+        property: r'isSynced',
         value: value,
       ));
     });
@@ -1544,6 +1573,142 @@ extension LocalClaimedLoopQueryFilter
       ));
     });
   }
+
+  QueryBuilder<LocalClaimedLoop, LocalClaimedLoop, QAfterFilterCondition>
+      userIdEqualTo(
+    String value, {
+    bool caseSensitive = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.equalTo(
+        property: r'userId',
+        value: value,
+        caseSensitive: caseSensitive,
+      ));
+    });
+  }
+
+  QueryBuilder<LocalClaimedLoop, LocalClaimedLoop, QAfterFilterCondition>
+      userIdGreaterThan(
+    String value, {
+    bool include = false,
+    bool caseSensitive = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.greaterThan(
+        include: include,
+        property: r'userId',
+        value: value,
+        caseSensitive: caseSensitive,
+      ));
+    });
+  }
+
+  QueryBuilder<LocalClaimedLoop, LocalClaimedLoop, QAfterFilterCondition>
+      userIdLessThan(
+    String value, {
+    bool include = false,
+    bool caseSensitive = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.lessThan(
+        include: include,
+        property: r'userId',
+        value: value,
+        caseSensitive: caseSensitive,
+      ));
+    });
+  }
+
+  QueryBuilder<LocalClaimedLoop, LocalClaimedLoop, QAfterFilterCondition>
+      userIdBetween(
+    String lower,
+    String upper, {
+    bool includeLower = true,
+    bool includeUpper = true,
+    bool caseSensitive = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.between(
+        property: r'userId',
+        lower: lower,
+        includeLower: includeLower,
+        upper: upper,
+        includeUpper: includeUpper,
+        caseSensitive: caseSensitive,
+      ));
+    });
+  }
+
+  QueryBuilder<LocalClaimedLoop, LocalClaimedLoop, QAfterFilterCondition>
+      userIdStartsWith(
+    String value, {
+    bool caseSensitive = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.startsWith(
+        property: r'userId',
+        value: value,
+        caseSensitive: caseSensitive,
+      ));
+    });
+  }
+
+  QueryBuilder<LocalClaimedLoop, LocalClaimedLoop, QAfterFilterCondition>
+      userIdEndsWith(
+    String value, {
+    bool caseSensitive = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.endsWith(
+        property: r'userId',
+        value: value,
+        caseSensitive: caseSensitive,
+      ));
+    });
+  }
+
+  QueryBuilder<LocalClaimedLoop, LocalClaimedLoop, QAfterFilterCondition>
+      userIdContains(String value, {bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.contains(
+        property: r'userId',
+        value: value,
+        caseSensitive: caseSensitive,
+      ));
+    });
+  }
+
+  QueryBuilder<LocalClaimedLoop, LocalClaimedLoop, QAfterFilterCondition>
+      userIdMatches(String pattern, {bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.matches(
+        property: r'userId',
+        wildcard: pattern,
+        caseSensitive: caseSensitive,
+      ));
+    });
+  }
+
+  QueryBuilder<LocalClaimedLoop, LocalClaimedLoop, QAfterFilterCondition>
+      userIdIsEmpty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.equalTo(
+        property: r'userId',
+        value: '',
+      ));
+    });
+  }
+
+  QueryBuilder<LocalClaimedLoop, LocalClaimedLoop, QAfterFilterCondition>
+      userIdIsNotEmpty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.greaterThan(
+        property: r'userId',
+        value: '',
+      ));
+    });
+  }
 }
 
 extension LocalClaimedLoopQueryObject
@@ -1579,6 +1744,20 @@ extension LocalClaimedLoopQuerySortBy
       sortByIsMyClaimDesc() {
     return QueryBuilder.apply(this, (query) {
       return query.addSortBy(r'isMyClaim', Sort.desc);
+    });
+  }
+
+  QueryBuilder<LocalClaimedLoop, LocalClaimedLoop, QAfterSortBy>
+      sortByIsSynced() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'isSynced', Sort.asc);
+    });
+  }
+
+  QueryBuilder<LocalClaimedLoop, LocalClaimedLoop, QAfterSortBy>
+      sortByIsSyncedDesc() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'isSynced', Sort.desc);
     });
   }
 
@@ -1664,6 +1843,20 @@ extension LocalClaimedLoopQuerySortBy
       return query.addSortBy(r'streakCount', Sort.desc);
     });
   }
+
+  QueryBuilder<LocalClaimedLoop, LocalClaimedLoop, QAfterSortBy>
+      sortByUserId() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'userId', Sort.asc);
+    });
+  }
+
+  QueryBuilder<LocalClaimedLoop, LocalClaimedLoop, QAfterSortBy>
+      sortByUserIdDesc() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'userId', Sort.desc);
+    });
+  }
 }
 
 extension LocalClaimedLoopQuerySortThenBy
@@ -1706,6 +1899,20 @@ extension LocalClaimedLoopQuerySortThenBy
       thenByIsMyClaimDesc() {
     return QueryBuilder.apply(this, (query) {
       return query.addSortBy(r'isMyClaim', Sort.desc);
+    });
+  }
+
+  QueryBuilder<LocalClaimedLoop, LocalClaimedLoop, QAfterSortBy>
+      thenByIsSynced() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'isSynced', Sort.asc);
+    });
+  }
+
+  QueryBuilder<LocalClaimedLoop, LocalClaimedLoop, QAfterSortBy>
+      thenByIsSyncedDesc() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'isSynced', Sort.desc);
     });
   }
 
@@ -1791,6 +1998,20 @@ extension LocalClaimedLoopQuerySortThenBy
       return query.addSortBy(r'streakCount', Sort.desc);
     });
   }
+
+  QueryBuilder<LocalClaimedLoop, LocalClaimedLoop, QAfterSortBy>
+      thenByUserId() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'userId', Sort.asc);
+    });
+  }
+
+  QueryBuilder<LocalClaimedLoop, LocalClaimedLoop, QAfterSortBy>
+      thenByUserIdDesc() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'userId', Sort.desc);
+    });
+  }
 }
 
 extension LocalClaimedLoopQueryWhereDistinct
@@ -1806,6 +2027,13 @@ extension LocalClaimedLoopQueryWhereDistinct
       distinctByIsMyClaim() {
     return QueryBuilder.apply(this, (query) {
       return query.addDistinctBy(r'isMyClaim');
+    });
+  }
+
+  QueryBuilder<LocalClaimedLoop, LocalClaimedLoop, QDistinct>
+      distinctByIsSynced() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addDistinctBy(r'isSynced');
     });
   }
 
@@ -1865,6 +2093,13 @@ extension LocalClaimedLoopQueryWhereDistinct
       return query.addDistinctBy(r'streakCount');
     });
   }
+
+  QueryBuilder<LocalClaimedLoop, LocalClaimedLoop, QDistinct> distinctByUserId(
+      {bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addDistinctBy(r'userId', caseSensitive: caseSensitive);
+    });
+  }
 }
 
 extension LocalClaimedLoopQueryProperty
@@ -1885,6 +2120,12 @@ extension LocalClaimedLoopQueryProperty
   QueryBuilder<LocalClaimedLoop, bool, QQueryOperations> isMyClaimProperty() {
     return QueryBuilder.apply(this, (query) {
       return query.addPropertyName(r'isMyClaim');
+    });
+  }
+
+  QueryBuilder<LocalClaimedLoop, bool, QQueryOperations> isSyncedProperty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addPropertyName(r'isSynced');
     });
   }
 
@@ -1936,6 +2177,12 @@ extension LocalClaimedLoopQueryProperty
   QueryBuilder<LocalClaimedLoop, int, QQueryOperations> streakCountProperty() {
     return QueryBuilder.apply(this, (query) {
       return query.addPropertyName(r'streakCount');
+    });
+  }
+
+  QueryBuilder<LocalClaimedLoop, String, QQueryOperations> userIdProperty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addPropertyName(r'userId');
     });
   }
 }

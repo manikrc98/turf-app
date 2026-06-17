@@ -8,6 +8,8 @@ class LocalWalkSession {
 
   @Index(unique: true, replace: true)
   late String sessionId;
+
+  late String userId;
   
   late String dateTime;
   late int steps;

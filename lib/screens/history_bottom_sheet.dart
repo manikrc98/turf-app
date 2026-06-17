@@ -2,11 +2,13 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show HapticFeedback;
 import 'package:google_fonts/google_fonts.dart';
+import 'package:provider/provider.dart';
 import '../models/walk_session_summary.dart';
 import '../models/local_walk_session.dart';
 import '../repositories/history_repository.dart';
 import '../repositories/isar_service.dart';
 import '../location/sound_manager.dart'; // Import SoundManager
+import '../providers/supabase_sync_provider.dart';
 
 class HistoryBottomSheet extends StatefulWidget {
   final VoidCallback? onStartWalking;
@@ -60,7 +62,9 @@ class _HistoryBottomSheetState extends State<HistoryBottomSheet> {
   }
 
   Future<void> _loadHistory() async {
-    final historyList = await _historyRepo.getHistory();
+    final syncProvider = Provider.of<SupabaseSyncProvider>(context, listen: false);
+    final uid = syncProvider.currentUserId ?? "guest_user";
+    final historyList = await _historyRepo.getHistory(uid);
     setState(() {
       _history = historyList;
       _isLoading = false;
@@ -111,7 +115,9 @@ class _HistoryBottomSheetState extends State<HistoryBottomSheet> {
     );
 
     if (confirm == true) {
-      await _historyRepo.clearHistory();
+      final syncProvider = Provider.of<SupabaseSyncProvider>(context, listen: false);
+      final uid = syncProvider.currentUserId ?? "guest_user";
+      await _historyRepo.clearHistory(uid);
       _loadHistory();
     }
   }
