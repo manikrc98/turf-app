@@ -502,6 +502,26 @@ void onStart(ServiceInstance service) async {
     service.stopSelf();
   });
 
+  service.on('name_loop').listen((event) {
+    if (event == null) return;
+    final String loopId = event['id'] ?? '';
+    final String name = event['name'] ?? '';
+    final String? newId = event['newId'];
+    
+    if (loopId.isNotEmpty) {
+      capturedLoops = capturedLoops.map((loop) {
+        if (loop.id == loopId) {
+          return loop.copyWith(
+            id: newId ?? loop.id,
+            name: name,
+          );
+        }
+        return loop;
+      }).toList();
+      saveToIsar();
+    }
+  });
+
   service.on('start').listen((event) {
     sessionId = event?['sessionId'] ?? "active_session";
     steps = 0;

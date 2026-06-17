@@ -1,8 +1,11 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show HapticFeedback;
 import 'package:google_fonts/google_fonts.dart';
 import '../models/walk_session_summary.dart';
+import '../models/local_walk_session.dart';
 import '../repositories/history_repository.dart';
+import '../repositories/isar_service.dart';
 import '../location/sound_manager.dart'; // Import SoundManager
 
 class HistoryBottomSheet extends StatefulWidget {
@@ -28,11 +31,32 @@ class _HistoryBottomSheetState extends State<HistoryBottomSheet> {
   final HistoryRepository _historyRepo = HistoryRepository();
   List<WalkSessionSummary> _history = [];
   bool _isLoading = true;
+  StreamSubscription? _historySubscription;
 
   @override
   void initState() {
     super.initState();
     _loadHistory();
+    _subscribeToHistoryChanges();
+  }
+
+  void _subscribeToHistoryChanges() async {
+    try {
+      final isar = await IsarService.getDB();
+      _historySubscription = isar.localWalkSessions.watchLazy().listen((_) {
+        if (mounted) {
+          _loadHistory();
+        }
+      });
+    } catch (e) {
+      print("Failed to subscribe to history changes: $e");
+    }
+  }
+
+  @override
+  void dispose() {
+    _historySubscription?.cancel();
+    super.dispose();
   }
 
   Future<void> _loadHistory() async {

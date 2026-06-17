@@ -11,6 +11,7 @@ import 'providers/location_tracking_provider.dart';
 import 'providers/supabase_sync_provider.dart';
 import 'screens/map_screen.dart';
 import 'screens/welcome_screen.dart';
+import 'screens/map_skeleton_screen.dart';
 import 'location/background_service.dart';
 
 void main() async {
@@ -128,12 +129,7 @@ class _AuthWrapperState extends State<AuthWrapper> {
     return Consumer<SupabaseSyncProvider>(
       builder: (context, syncProv, _) {
         if (!syncProv.initialized) {
-          return const Scaffold(
-            backgroundColor: Color(0xFF0F172A),
-            body: Center(
-              child: CircularProgressIndicator(color: Color(0xFF2196F3)),
-            ),
-          );
+          return const MapSkeletonScreen();
         }
 
         final bool isGoogleLoggedIn = syncProv.currentUserId != null && syncProv.isGoogleUser;

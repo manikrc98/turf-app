@@ -22,6 +22,7 @@ import '../location/sound_manager.dart'; // Import SoundManager
 import 'history_bottom_sheet.dart'; // Contains HistoryView
 import 'summary_bottom_sheet.dart';
 import 'marker_generator.dart';
+import 'map_skeleton_screen.dart';
 import 'package:isar/isar.dart';
 
 class MapScreen extends StatefulWidget {
@@ -263,12 +264,7 @@ class _MapScreenState extends State<MapScreen> {
   @override
   Widget build(BuildContext context) {
     if (!_permissionsChecked) {
-      return const Scaffold(
-        backgroundColor: Color(0xFF0A0A0A),
-        body: Center(
-          child: CircularProgressIndicator(color: Color(0xFFB8FF00)), // Lime green
-        ),
-      );
+      return const MapSkeletonScreen();
     }
 
     if (!_permissionsGranted) {
@@ -295,14 +291,13 @@ class _MapScreenState extends State<MapScreen> {
         bottom: false,
         child: Column(
           children: [
-            // Top HUD coordinates ticker (Only in MAP tab)
-            if (_currentTabIndex == 0)
-              Consumer<TrackingMetricsProvider>(
-                builder: (context, metricsProvider, _) {
-                  final bool isActive = metricsProvider.sessionStatus == SessionStatus.active;
-                  return _buildStatusBarHUD(isActive);
-                },
-              ),
+            // Top HUD coordinates ticker (Always rendered to prevent layout shifts, coordinates only shown in MAP tab)
+            Consumer<TrackingMetricsProvider>(
+              builder: (context, metricsProvider, _) {
+                final bool isActive = metricsProvider.sessionStatus == SessionStatus.active;
+                return _buildStatusBarHUD(isActive, showCoordinates: _currentTabIndex == 0);
+              },
+            ),
 
             // Tab Content
             Expanded(
@@ -315,9 +310,7 @@ class _MapScreenState extends State<MapScreen> {
                       // Google Map View
                       if (_mapStyleString == null)
                         const Positioned.fill(
-                          child: Center(
-                            child: CircularProgressIndicator(color: Color(0xFFB8FF00)),
-                          ),
+                          child: MapViewportSkeleton(),
                         )
                       else
                         ValueListenableBuilder<double>(
@@ -416,14 +409,7 @@ class _MapScreenState extends State<MapScreen> {
                             duration: const Duration(milliseconds: 350),
                             child: IgnorePointer(
                               ignoring: _mapReady,
-                              child: Container(
-                                color: const Color(0xFF0A0A0A),
-                                child: const Center(
-                                  child: CircularProgressIndicator(
-                                    color: Color(0xFFB8FF00),
-                                  ),
-                                ),
-                              ),
+                              child: const MapViewportSkeleton(),
                             ),
                           ),
                         ),
@@ -658,7 +644,7 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
-  Widget _buildStatusBarHUD(bool isActive) {
+  Widget _buildStatusBarHUD(bool isActive, {required bool showCoordinates}) {
     final latStr = _currentLocation != null ? "${_currentLocation!.latitude.toStringAsFixed(4)}°" : "--";
     final lngStr = _currentLocation != null ? "${_currentLocation!.longitude.toStringAsFixed(4)}°" : "--";
     final readout = "SYS_STATUS: ONLINE · LAT: $latStr · LNG: $lngStr";
@@ -668,18 +654,20 @@ class _MapScreenState extends State<MapScreen> {
       color: const Color(0xB30A0A0A), // rgba(10, 10, 10, 0.7)
       alignment: Alignment.center,
       padding: const EdgeInsets.symmetric(horizontal: 16),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Text(
-          readout,
-          style: GoogleFonts.jetBrainsMono(
-            color: isActive ? const Color(0xFFB8FF00) : const Color(0xFF444444), // Lime green #B8FF00
-            fontSize: 10,
-            fontWeight: FontWeight.w400,
-            letterSpacing: 10 * 0.06,
-          ),
-        ),
-      ),
+      child: showCoordinates
+          ? SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Text(
+                readout,
+                style: GoogleFonts.jetBrainsMono(
+                  color: isActive ? const Color(0xFFB8FF00) : const Color(0xFF444444), // Lime green #B8FF00
+                  fontSize: 10,
+                  fontWeight: FontWeight.w400,
+                  letterSpacing: 10 * 0.06,
+                ),
+              ),
+            )
+          : const SizedBox.shrink(),
     );
   }
 
@@ -1650,7 +1638,7 @@ class _MapScreenState extends State<MapScreen> {
                         content: Text("LOOP CLAIMED: ${name.toUpperCase()}", style: GoogleFonts.jetBrainsMono(color: const Color(0xFFB8FF00))),
                       ),
                     );
-                    await trackingProvider.loadClaimedLoops();
+                    await trackingProvider.nameLoop(loop.id, name, newLoopId: res['loop_id'] as String?);
                   } else {
                     scaffoldMessenger.showSnackBar(
                       SnackBar(

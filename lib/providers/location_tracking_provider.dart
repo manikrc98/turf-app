@@ -330,30 +330,38 @@ class LocationTrackingProvider extends ChangeNotifier {
   }
 
   /// Assign a name to a recently captured loop and claim/rename it
-  Future<void> nameLoop(String loopId, String name) async {
+  Future<void> nameLoop(String loopId, String name, {String? newLoopId}) async {
     // 1. Notify background service to update loop details in memory
-    FlutterBackgroundService().invoke('name_loop', {'id': loopId, 'name': name});
+    FlutterBackgroundService().invoke('name_loop', {
+      'id': loopId,
+      'name': name,
+      if (newLoopId != null) 'newId': newLoopId,
+    });
 
     // Update in active session captured loops list if still ongoing
     _capturedLoops = _capturedLoops.map((loop) {
       if (loop.id == loopId) {
-        return loop.copyWith(name: name);
+        return loop.copyWith(
+          id: newLoopId ?? loop.id,
+          name: name,
+        );
       }
       return loop;
     }).toList();
     notifyListeners();
 
     // 2. Fetch or create dynamic claim representation
-    final existingClaimIndex = _cachedClaimedLoops.indexWhere((l) => l.id == loopId);
+    final targetId = newLoopId ?? loopId;
+    final existingClaimIndex = _cachedClaimedLoops.indexWhere((l) => l.id == targetId);
     final today = ClaimedLoopRepository.getTodayDateString();
 
     if (existingClaimIndex != -1) {
       final updatedClaim = _cachedClaimedLoops[existingClaimIndex].copyWith(name: name);
       await _claimedLoopRepo.addOrUpdateClaimedLoop(updatedClaim);
     } else {
-      final loop = _capturedLoops.firstWhere((l) => l.id == loopId);
+      final loop = _capturedLoops.firstWhere((l) => l.id == targetId);
       final newClaim = ClaimedLoop(
-        id: loopId,
+        id: targetId,
         name: name,
         points: loop.points,
         streakCount: 1,
@@ -367,7 +375,7 @@ class LocationTrackingProvider extends ChangeNotifier {
     try {
       final client = Supabase.instance.client;
       if (client.auth.currentSession != null) {
-        await client.from('loops').update({'name': name}).eq('id', loopId);
+        await client.from('loops').update({'name': name}).eq('id', targetId);
       }
     } catch (e) {
       print("Failed to sync loop rename to Supabase: $e");
